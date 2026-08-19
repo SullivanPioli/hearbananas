@@ -5,9 +5,13 @@
   import { getRTCPeerConnectionConfig } from './Config'
 
   export let connectionState: string = 'disconnected'
+  export let hasRemoteAudio = false
+  export let remoteAudioActive = false
+  export let remoteAudioPlaybackBlocked = false
 
   type SetupOptions = {
     shareSystemAudio?: boolean
+    remoteAudioElement?: HTMLAudioElement | null
   }
 
   const errorHander = (e: unknown): void => {
@@ -21,6 +25,7 @@
   let remoteCursorPingChannel: RTCDataChannel | null = null
   let audioStream: MediaStream | null = null
   let systemAudioStream: MediaStream | null = null
+  let systemAudioSender: RTCRtpSender | null = null
   let remoteAudioStream: MediaStream | null = null
   let stream: MediaStream | null = null
   let audioElement: HTMLAudioElement | null = null
@@ -92,14 +97,21 @@
         .filter((deviceId): deviceId is string => Boolean(deviceId))
     )
 
-    return devices.filter(
+    const audioInputDevices = devices.filter(
       (device) => device.kind === 'audioinput' && !microphoneDeviceIds.has(device.deviceId)
     )
+    const likelySystemAudioDevices = audioInputDevices.filter((device) =>
+      /hear.?bananas|monitor|loopback|stereo.?mix|what.?u.?hear|wave.?out|mixed.?output/i.test(
+        device.label
+      )
+    )
+
+    return likelySystemAudioDevices.length > 0 ? likelySystemAudioDevices : audioInputDevices
   }
   export async function SetSystemAudioDevice(deviceId: string): Promise<boolean> {
-    if (!pc || !deviceId) return false
+    if (!pc || !systemAudioSender || !deviceId) return false
 
-    stopSystemAudioStream()
+    await stopSystemAudioStream()
     try {
       systemAudioStream = await navigator.mediaDevices.getUserMedia({
         video: false,
@@ -111,11 +123,17 @@
           channelCount: { ideal: 2 }
         }
       })
-      for (const track of systemAudioStream.getAudioTracks()) {
-        pc.addTrack(track, systemAudioStream)
+      const [track] = systemAudioStream.getAudioTracks()
+      if (!track) {
+        systemAudioStream = null
+        return false
       }
-      return systemAudioStream.getAudioTracks().length > 0
+      await systemAudioSender.replaceTrack(track)
+      return track.readyState === 'live'
     } catch (e) {
+      for (const track of systemAudioStream?.getTracks() ?? []) {
+        track.stop()
+      }
       systemAudioStream = null
       errorHander(e)
       return false
@@ -126,6 +144,30 @@
     if (remoteMouseCursorPositionsChannel.readyState !== 'open') return false
     remoteCursorPositionsEnabled = enabled
     return enabled
+  }
+  export async function EnableRemoteAudio(): Promise<boolean> {
+    if (!audioElement || !hasRemoteAudio) return false
+    audioElement.muted = false
+    try {
+      await audioElement.play()
+      remoteAudioActive = true
+      remoteAudioPlaybackBlocked = false
+      return true
+    } catch (error) {
+      remoteAudioActive = false
+      remoteAudioPlaybackBlocked = true
+      console.warn('Remote audio playback could not start', error)
+      return false
+    }
+  }
+  export async function ToggleRemoteAudio(): Promise<boolean> {
+    if (!audioElement || !hasRemoteAudio) return false
+    if (remoteAudioActive && !audioElement.muted) {
+      audioElement.muted = true
+      remoteAudioActive = false
+      return false
+    }
+    return await EnableRemoteAudio()
   }
 
   const ICE_GATHERING_TIMEOUT_MS = 10000
@@ -169,14 +211,16 @@
     return [...(stream?.getAudioTracks() ?? []), ...(systemAudioStream?.getAudioTracks() ?? [])]
   }
 
-  const stopSystemAudioStream = (): void => {
-    if (!systemAudioStream) return
-    for (const track of systemAudioStream.getTracks()) {
-      const sender = pc?.getSenders().find((candidate) => candidate.track?.id === track.id)
-      if (sender) pc?.removeTrack(sender)
-      track.stop()
+  const stopSystemAudioStream = async (): Promise<void> => {
+    if (systemAudioSender?.track) {
+      await systemAudioSender.replaceTrack(null).catch(errorHander)
     }
-    systemAudioStream = null
+    if (systemAudioStream) {
+      for (const track of systemAudioStream.getTracks()) {
+        track.stop()
+      }
+      systemAudioStream = null
+    }
   }
 
   export async function Setup(
@@ -185,15 +229,32 @@
   ): Promise<void> {
     userSettings = await window.BananasApi.getSettings()
     remoteVideo = v
-    audioElement = document.createElement('audio')
+    hasRemoteAudio = false
+    remoteAudioActive = false
+    remoteAudioPlaybackBlocked = false
+    audioElement = options.remoteAudioElement ?? document.createElement('audio')
     audioElement.autoplay = true
+    audioElement.muted = false
     remoteAudioStream = new MediaStream()
     audioElement.srcObject = remoteAudioStream
+    audioElement.onplaying = (): void => {
+      remoteAudioActive = !audioElement?.muted
+      remoteAudioPlaybackBlocked = false
+    }
+    audioElement.onpause = (): void => {
+      remoteAudioActive = false
+    }
+    audioElement.onvolumechange = (): void => {
+      remoteAudioActive = !audioElement?.muted && !audioElement?.paused
+    }
     if (pc) {
       pc.close()
       pc = null
     }
     pc = new RTCPeerConnection(await getRTCPeerConnectionConfig())
+    systemAudioSender = remoteVideo
+      ? null
+      : pc.addTransceiver('audio', { direction: 'sendonly' }).sender
     pc.ondatachannel = (e: RTCDataChannelEvent): void => {
       if (e.channel.label === 'remoteMouseCursorPositions') {
         setupDataChannel(e.channel)
@@ -212,12 +273,11 @@
         remoteVideo.srcObject = videoStream
       }
       if (evt.track.kind === 'audio' && remoteAudioStream) {
+        hasRemoteAudio = true
         if (!remoteAudioStream.getTracks().some((track) => track.id === evt.track.id)) {
           remoteAudioStream.addTrack(evt.track)
         }
-        audioElement?.play().catch((error) => {
-          console.warn('Remote audio playback could not start automatically', error)
-        })
+        void EnableRemoteAudio()
       }
     }
     pc.onicecandidate = function (e: RTCPeerConnectionIceEvent): void {
@@ -245,8 +305,12 @@
           video: true,
           audio: options.shareSystemAudio === true
         })
-        for (const track of stream.getTracks()) {
+        for (const track of stream.getVideoTracks()) {
           pc.addTrack(track, stream)
+        }
+        const [displayAudioTrack] = stream.getAudioTracks()
+        if (displayAudioTrack && systemAudioSender) {
+          await systemAudioSender.replaceTrack(displayAudioTrack)
         }
         if (audioStream) {
           for (const track of audioStream.getTracks()) {
@@ -345,6 +409,7 @@
   }
   export async function Disconnect(): Promise<void> {
     try {
+      await stopSystemAudioStream()
       pc.close()
       pc = null
       if (stream) {
@@ -359,13 +424,19 @@
         }
         audioStream = null
       }
-      stopSystemAudioStream()
       if (audioElement) {
         audioElement.pause()
         audioElement.srcObject = null
+        audioElement.onplaying = null
+        audioElement.onpause = null
+        audioElement.onvolumechange = null
         audioElement = null
       }
       remoteAudioStream = null
+      systemAudioSender = null
+      hasRemoteAudio = false
+      remoteAudioActive = false
+      remoteAudioPlaybackBlocked = false
     } catch (e) {
       errorHander(e)
     }

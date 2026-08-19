@@ -25,7 +25,7 @@ without the need for an account or any server infrastructure
 ## Install
 
 Grab the latest release from the
-[GitHub releases page](https://github.com/mistweaverco/bananas/releases/latest).
+[GitHub releases page](https://github.com/SullivanPioli/hearbananas/releases/latest).
 
 Or if you are on Mac you can install it via homebrew with
 
@@ -45,8 +45,14 @@ When hosting a session, enable **Share system audio** before starting it.
   so the AppImage does not need a bundled audio server or native Node module. The host must provide
   `pactl` (on Arch Linux, it is supplied by the `libpulse` package).
 
-If automatic setup fails, check that `pactl info` works and that `@DEFAULT_MONITOR@` resolves to the
-output you want to share. Existing virtual or loopback inputs can be selected manually in the app.
+Before copying the connection string, play some game or video audio and wait for the app to report
+that sound is being detected. The connection-string button remains disabled until a valid audio
+track is ready. If the receiving computer blocks automatic playback, use the **Enable stream
+audio** warning or the volume button in the session toolbar.
+
+If automatic Linux setup fails, check that `pactl info` and `pactl get-default-sink` work and that
+the default sink has a matching `.monitor` source in `pactl list short sources`. Existing virtual
+or loopback inputs can be selected manually in the app.
 Whole-system loopback can also capture remote participant audio played by Bananas. If that causes an
 echo, mute participant microphone return or route Bananas playback to an output that is not being
 captured.

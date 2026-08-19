@@ -32,6 +32,11 @@
   let systemAudioDevices: MediaDeviceInfo[] = []
   let selectedSystemAudioDeviceId = ''
   let systemAudioDeviceIsLoading = false
+  let systemAudioSignalActive = false
+  let remoteAudioElement: HTMLAudioElement
+  let hasRemoteAudio = false
+  let remoteAudioActive = false
+  let remoteAudioPlaybackBlocked = false
   let visualizerIsActive: boolean = true
 
   const onConnectionStringChange = async (): Promise<void> => {
@@ -89,6 +94,22 @@
     webRTCComponent.ToggleRemoteCursors(cursorsActive)
   }
 
+  const normalizeAudioDeviceLabel = (label: string): string => {
+    return label.replaceAll(/[_\s-]/g, '').toLowerCase()
+  }
+
+  const waitForSystemAudioDevice = async (label: string): Promise<MediaDeviceInfo | undefined> => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      systemAudioDevices = await webRTCComponent.GetSystemAudioInputDevices()
+      const preparedDevice = systemAudioDevices.find((device) =>
+        normalizeAudioDeviceLabel(device.label).includes(normalizeAudioDeviceLabel(label))
+      )
+      if (preparedDevice) return preparedDevice
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    return undefined
+  }
+
   onMount(async () => {
     platform = window.BananasApi.getPlatform()
     const settings = await window.BananasApi.getSettings()
@@ -120,13 +141,17 @@
         Swal.fire({
           icon: 'warning',
           title: 'Could not prepare Linux system audio',
-          text: 'The AppImage needs pactl and a working PipeWire/PulseAudio default output monitor.'
+          text:
+            error instanceof Error
+              ? error.message
+              : 'The AppImage needs pactl and a working PipeWire/PulseAudio default output monitor.'
         })
       }
     }
 
     await webRTCComponent.Setup(null, {
-      shareSystemAudio: shareSystemAudio && platform === 'win32'
+      shareSystemAudio: shareSystemAudio && platform === 'win32',
+      remoteAudioElement
     })
     sessionStarted = true
     $navigationEnabled = false
@@ -135,13 +160,7 @@
     hasSystemAudioInput = webRTCComponent.HasSystemAudioInput()
 
     if (shareSystemAudio && platform === 'linux' && preparedLinuxSource) {
-      systemAudioDevices = await webRTCComponent.GetSystemAudioInputDevices()
-      const preparedDevice = systemAudioDevices.find((device) =>
-        device.label
-          .replaceAll(/[_\s-]/g, '')
-          .toLowerCase()
-          .includes(preparedLinuxSource.label.replaceAll(/[_\s-]/g, '').toLowerCase())
-      )
+      const preparedDevice = await waitForSystemAudioDevice(preparedLinuxSource.label)
       if (preparedDevice) {
         selectedSystemAudioDeviceId = preparedDevice.deviceId
         await selectSystemAudioDevice()
@@ -154,6 +173,7 @@
   const selectSystemAudioDevice = async (): Promise<void> => {
     if (!selectedSystemAudioDeviceId) return
     systemAudioDeviceIsLoading = true
+    systemAudioSignalActive = false
     hasSystemAudioInput = await webRTCComponent.SetSystemAudioDevice(selectedSystemAudioDeviceId)
     systemAudioActive = webRTCComponent.IsSystemAudioActive()
     systemAudioDeviceIsLoading = false
@@ -177,6 +197,10 @@
     systemAudioDevices = []
     selectedSystemAudioDeviceId = ''
     systemAudioDeviceIsLoading = false
+    systemAudioSignalActive = false
+    hasRemoteAudio = false
+    remoteAudioActive = false
+    remoteAudioPlaybackBlocked = false
     isStreaming = false
     sessionStarted = false
     connectionStringIsValid = null
@@ -205,10 +229,21 @@
   const onSystemAudioToggle = (): void => {
     webRTCComponent.ToggleSystemAudio()
     systemAudioActive = webRTCComponent.IsSystemAudioActive()
+    if (!systemAudioActive) systemAudioSignalActive = false
+  }
+  const onRemoteAudioToggle = async (): Promise<void> => {
+    remoteAudioActive = await webRTCComponent.ToggleRemoteAudio()
   }
 </script>
 
-<WebRTC bind:connectionState bind:this={webRTCComponent} />
+<WebRTC
+  bind:connectionState
+  bind:hasRemoteAudio
+  bind:remoteAudioActive
+  bind:remoteAudioPlaybackBlocked
+  bind:this={webRTCComponent}
+/>
+<audio bind:this={remoteAudioElement} autoplay class="is-hidden"></audio>
 
 <div class="container p-5">
   <h1 class="title">{!isStreaming ? L.host_a_session() : L.hosting_a_session()}</h1>
@@ -252,7 +287,31 @@
               on:click={onSystemAudioToggle}
             >
               <span class="icon">
-                <i class="fas {systemAudioActive ? 'fa-volume-high' : 'fa-volume-xmark'}"></i>
+                {#key selectedSystemAudioDeviceId}
+                  {#if systemAudioActive}
+                    <AudioVisualizer
+                      className="icon {!systemAudioSignalActive ? 'is-hidden' : ''}"
+                      bind:visualizerIsActive={systemAudioSignalActive}
+                      stream={webRTCComponent.GetSystemAudioStream()}
+                    />
+                  {/if}
+                {/key}
+                <i
+                  class="fas {systemAudioActive
+                    ? 'fa-volume-high'
+                    : 'fa-volume-xmark'} {systemAudioSignalActive ? 'is-hidden' : ''}"
+                ></i>
+              </span>
+            </button>
+          {/if}
+          {#if hasRemoteAudio}
+            <button
+              title={remoteAudioActive ? 'Participant audio active' : 'Enable participant audio'}
+              class="button {remoteAudioActive ? 'is-success' : 'is-danger'}"
+              on:click={onRemoteAudioToggle}
+            >
+              <span class="icon">
+                <i class="fas {remoteAudioActive ? 'fa-headphones' : 'fa-volume-xmark'}"></i>
               </span>
             </button>
           {/if}
@@ -325,6 +384,7 @@
             ? 'is-hidden'
             : ''} {copyButtonIsLoading ? 'is-loading' : ''}"
           bind:this={copyButton}
+          disabled={shareSystemAudio && !hasSystemAudioInput}
         >
           <span class="icon">
             <i class="fas fa-copy"></i>
@@ -364,6 +424,26 @@
       <div class="notification is-warning is-light">
         No system-audio source was detected. Make sure pactl can access the default PipeWire or
         PulseAudio output monitor, then cancel and start the session again.
+      </div>
+    {/if}
+
+    {#if sessionStarted && !isStreaming && shareSystemAudio && hasSystemAudioInput}
+      <div class="notification is-light {systemAudioSignalActive ? 'is-success' : 'is-warning'}">
+        {#if systemAudioSignalActive}
+          System audio is ready and sound is being detected. You can copy the connection string.
+        {:else}
+          The system-audio track is ready, but no sound is currently detected. Play some game or
+          video audio and confirm that the volume icon starts moving before connecting.
+        {/if}
+      </div>
+    {/if}
+
+    {#if remoteAudioPlaybackBlocked}
+      <div class="notification is-warning is-light">
+        Participant audio is ready, but automatic playback was blocked.
+        <button class="button is-small is-warning" on:click={onRemoteAudioToggle}>
+          Enable participant audio
+        </button>
       </div>
     {/if}
 

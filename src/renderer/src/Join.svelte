@@ -21,6 +21,7 @@
   let connectButton: HTMLButtonElement
   let copyButton: HTMLButtonElement
   let remoteScreen: HTMLVideoElement
+  let remoteAudioElement: HTMLAudioElement
   let UUID = getUUIDv4()
   let zoomFactor = 1
   let microphoneActive = false
@@ -29,6 +30,9 @@
   let connectionStringIsValid: boolean | null = null
   let connectToUserName = ''
   let copyButtonIsLoading = false
+  let hasRemoteAudio = false
+  let remoteAudioActive = false
+  let remoteAudioPlaybackBlocked = false
   let connectionString = useParticipantUrl()
   let visualizerIsActive: boolean = true
 
@@ -86,7 +90,7 @@
     microphoneActive = settings.isMicrophoneEnabledOnConnect
     makeVideoDraggable(remoteScreen)
     connectButton.addEventListener('click', async () => {
-      await webRTCComponent.Setup(remoteScreen)
+      await webRTCComponent.Setup(remoteScreen, { remoteAudioElement })
       const data = await getDataFromBananasUrl($connectionString)
       await webRTCComponent.Connect(data.rtcSessionDescription)
       isConnected = true
@@ -129,6 +133,9 @@
     isStreaming = false
     microphoneActive = false
     isConnected = false
+    hasRemoteAudio = false
+    remoteAudioActive = false
+    remoteAudioPlaybackBlocked = false
     $navigationEnabled = true
     $isWatching = false
   }
@@ -152,9 +159,19 @@
     microphoneActive = !microphoneActive
     webRTCComponent.ToggleMicrophone()
   }
+  const onRemoteAudioToggle = async (): Promise<void> => {
+    remoteAudioActive = await webRTCComponent.ToggleRemoteAudio()
+  }
 </script>
 
-<WebRTC bind:connectionState bind:this={webRTCComponent} />
+<WebRTC
+  bind:connectionState
+  bind:hasRemoteAudio
+  bind:remoteAudioActive
+  bind:remoteAudioPlaybackBlocked
+  bind:this={webRTCComponent}
+/>
+<audio bind:this={remoteAudioElement} autoplay class="is-hidden"></audio>
 
 <div class="container p-5">
   <h1 class="title">{!isStreaming ? L.join_a_session() : L.joined_a_session()}</h1>
@@ -181,6 +198,17 @@
               {/if}
             </span>
           </button>
+          {#if hasRemoteAudio}
+            <button
+              title={remoteAudioActive ? 'Stream audio active' : 'Enable stream audio'}
+              class="button {remoteAudioActive ? 'is-success' : 'is-danger'}"
+              on:click={onRemoteAudioToggle}
+            >
+              <span class="icon">
+                <i class="fas {remoteAudioActive ? 'fa-volume-high' : 'fa-volume-xmark'}"></i>
+              </span>
+            </button>
+          {/if}
         </div>
         <div class="cell has-text-right">
           <button class="button is-danger" aria-label={L.disconnect()} on:click={onDisconnectClick}>
@@ -266,6 +294,17 @@
     </div>
   </div>
 </div>
+
+{#if remoteAudioPlaybackBlocked}
+  <div class="container px-5">
+    <div class="notification is-warning is-light">
+      Stream audio is ready, but automatic playback was blocked.
+      <button class="button is-small is-warning" on:click={onRemoteAudioToggle}>
+        Enable stream audio
+      </button>
+    </div>
+  </div>
+{/if}
 
 <div class={!isStreaming ? 'is-hidden' : ''}>
   <div class="field">
