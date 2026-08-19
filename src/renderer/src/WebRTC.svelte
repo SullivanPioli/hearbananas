@@ -6,7 +6,11 @@
 
   export let connectionState: string = 'disconnected'
 
-  const errorHander = (e: ErrorEvent): void => {
+  type SetupOptions = {
+    shareSystemAudio?: boolean
+  }
+
+  const errorHander = (e: unknown): void => {
     console.error(e)
   }
 
@@ -16,6 +20,8 @@
   let remoteMouseCursorPositionsChannel: RTCDataChannel | null = null
   let remoteCursorPingChannel: RTCDataChannel | null = null
   let audioStream: MediaStream | null = null
+  let systemAudioStream: MediaStream | null = null
+  let remoteAudioStream: MediaStream | null = null
   let stream: MediaStream | null = null
   let audioElement: HTMLAudioElement | null = null
   let userSettings: SettingsData | null = null
@@ -71,6 +77,50 @@
   export function GetAudioStream(): MediaStream | null {
     return audioStream
   }
+  export function HasSystemAudioInput(): boolean {
+    return getSystemAudioTracks().some((track) => track.readyState === 'live')
+  }
+  export function GetSystemAudioStream(): MediaStream | null {
+    const tracks = getSystemAudioTracks()
+    return tracks.length > 0 ? new MediaStream(tracks) : null
+  }
+  export async function GetSystemAudioInputDevices(): Promise<MediaDeviceInfo[]> {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    const microphoneDeviceIds = new Set(
+      (audioStream?.getAudioTracks() ?? [])
+        .map((track) => track.getSettings().deviceId)
+        .filter((deviceId): deviceId is string => Boolean(deviceId))
+    )
+
+    return devices.filter(
+      (device) => device.kind === 'audioinput' && !microphoneDeviceIds.has(device.deviceId)
+    )
+  }
+  export async function SetSystemAudioDevice(deviceId: string): Promise<boolean> {
+    if (!pc || !deviceId) return false
+
+    stopSystemAudioStream()
+    try {
+      systemAudioStream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: {
+          deviceId: { exact: deviceId },
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+          channelCount: { ideal: 2 }
+        }
+      })
+      for (const track of systemAudioStream.getAudioTracks()) {
+        pc.addTrack(track, systemAudioStream)
+      }
+      return systemAudioStream.getAudioTracks().length > 0
+    } catch (e) {
+      systemAudioStream = null
+      errorHander(e)
+      return false
+    }
+  }
   export function ToggleRemoteCursors(enabled: boolean): boolean {
     if (!remoteMouseCursorPositionsChannel) return false
     if (remoteMouseCursorPositionsChannel.readyState !== 'open') return false
@@ -115,12 +165,30 @@
     }
   }
 
-  export async function Setup(v: HTMLVideoElement = null): Promise<void> {
+  const getSystemAudioTracks = (): MediaStreamTrack[] => {
+    return [...(stream?.getAudioTracks() ?? []), ...(systemAudioStream?.getAudioTracks() ?? [])]
+  }
+
+  const stopSystemAudioStream = (): void => {
+    if (!systemAudioStream) return
+    for (const track of systemAudioStream.getTracks()) {
+      const sender = pc?.getSenders().find((candidate) => candidate.track?.id === track.id)
+      if (sender) pc?.removeTrack(sender)
+      track.stop()
+    }
+    systemAudioStream = null
+  }
+
+  export async function Setup(
+    v: HTMLVideoElement = null,
+    options: SetupOptions = {}
+  ): Promise<void> {
     userSettings = await window.BananasApi.getSettings()
     remoteVideo = v
     audioElement = document.createElement('audio')
-    audioElement.controls = true
     audioElement.autoplay = true
+    remoteAudioStream = new MediaStream()
+    audioElement.srcObject = remoteAudioStream
     if (pc) {
       pc.close()
       pc = null
@@ -135,11 +203,21 @@
       }
     }
     pc.ontrack = (evt): void => {
-      if (remoteVideo) {
-        remoteVideo.srcObject = evt.streams[0]
+      if (evt.track.kind === 'video' && remoteVideo) {
+        const videoStream =
+          remoteVideo.srcObject instanceof MediaStream ? remoteVideo.srcObject : new MediaStream()
+        if (!videoStream.getTracks().some((track) => track.id === evt.track.id)) {
+          videoStream.addTrack(evt.track)
+        }
+        remoteVideo.srcObject = videoStream
       }
-      if (audioStream) {
-        audioElement.srcObject = evt.streams[0]
+      if (evt.track.kind === 'audio' && remoteAudioStream) {
+        if (!remoteAudioStream.getTracks().some((track) => track.id === evt.track.id)) {
+          remoteAudioStream.addTrack(evt.track)
+        }
+        audioElement?.play().catch((error) => {
+          console.warn('Remote audio playback could not start automatically', error)
+        })
       }
     }
     pc.onicecandidate = function (e: RTCPeerConnectionIceEvent): void {
@@ -165,7 +243,7 @@
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
-          audio: false
+          audio: options.shareSystemAudio === true
         })
         for (const track of stream.getTracks()) {
           pc.addTrack(track, stream)
@@ -229,6 +307,16 @@
       }
     }
   }
+  export function ToggleSystemAudio(): void {
+    const tracks = getSystemAudioTracks()
+    const enabled = !tracks.some((track) => track.enabled)
+    for (const track of tracks) {
+      track.enabled = enabled
+    }
+  }
+  export function IsSystemAudioActive(): boolean {
+    return getSystemAudioTracks().some((track) => track.readyState === 'live' && track.enabled)
+  }
   export function IsMicrophoneActive(): boolean {
     if (audioStream) {
       for (const track of audioStream.getAudioTracks()) {
@@ -271,6 +359,13 @@
         }
         audioStream = null
       }
+      stopSystemAudioStream()
+      if (audioElement) {
+        audioElement.pause()
+        audioElement.srcObject = null
+        audioElement = null
+      }
+      remoteAudioStream = null
     } catch (e) {
       errorHander(e)
     }

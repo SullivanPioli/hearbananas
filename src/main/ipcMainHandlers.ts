@@ -2,6 +2,7 @@ import type { SettingsData } from './stateKeeper'
 import { app, BrowserWindow, ipcMain, screen } from 'electron'
 import { createCursorsWindow } from './cursors'
 import { settingsKeeper } from './stateKeeper'
+import { prepareLinuxSystemAudio, releaseLinuxSystemAudio } from './systemAudio'
 
 export const ipcMainHandlersInit = (): void => {
   const availableDimensions = screen.getPrimaryDisplay().workAreaSize
@@ -54,5 +55,11 @@ export const ipcMainHandlersInit = (): void => {
   })
   ipcMain.handle('getAppVersion', (): string => {
     return app.getVersion()
+  })
+  ipcMain.handle('prepareLinuxSystemAudio', async () => {
+    return await prepareLinuxSystemAudio()
+  })
+  ipcMain.handle('releaseLinuxSystemAudio', async (): Promise<void> => {
+    await releaseLinuxSystemAudio()
   })
 }
