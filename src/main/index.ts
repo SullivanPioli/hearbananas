@@ -6,6 +6,7 @@ import icon from '../../resources/icon.png?asset'
 import { windowStateKeeper } from './stateKeeper'
 import { ipcMainHandlersInit } from './ipcMainHandlers'
 import { isInProductionMode } from './utils'
+import { releaseLinuxSystemAudioSync } from './systemAudio'
 
 const CUSTOM_PROTOCOL = 'bananas'
 
@@ -70,9 +71,14 @@ async function createWindow(): Promise<void> {
 
   mainWindowState.track(MAIN_WINDOW)
 
-  session.defaultSession.setDisplayMediaRequestHandler((_, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-      callback({ video: sources[0] })
+      callback({
+        video: sources[0],
+        ...(process.platform === 'win32' && request.audioRequested
+          ? { audio: 'loopback' as const }
+          : {})
+      })
     })
   })
 
@@ -120,4 +126,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  releaseLinuxSystemAudioSync()
 })

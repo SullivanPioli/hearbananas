@@ -12,6 +12,7 @@ declare global {
   interface Window {
     electron: ElectronAPI
     BananasApi: {
+      getPlatform: () => NodeJS.Platform
       toggleRemoteCursors: (state: boolean) => Promise<void>
       remoteCursorPing: (cursorId: string) => Promise<void>
       updateRemoteCursor: (state: {
@@ -36,6 +37,11 @@ declare global {
         iceServers: IceServer[]
       }>
       getAppVersion: () => Promise<string>
+      prepareLinuxSystemAudio: () => Promise<{
+        name: string
+        label: string
+      } | null>
+      releaseLinuxSystemAudio: () => Promise<void>
     }
   }
 }

@@ -13,6 +13,7 @@
   let webRTCComponent: WebRTC
   let connectButton: HTMLButtonElement
   let copyButton: HTMLButtonElement
+  let platform = ''
 
   let connectionState = 'disconnected'
   let cursorsActive = false
@@ -25,6 +26,12 @@
   let copyButtonIsLoading = false
   let connectionString = useHostUrl()
   let hasAudioInput = false
+  let shareSystemAudio = false
+  let hasSystemAudioInput = false
+  let systemAudioActive = false
+  let systemAudioDevices: MediaDeviceInfo[] = []
+  let selectedSystemAudioDeviceId = ''
+  let systemAudioDeviceIsLoading = false
   let visualizerIsActive: boolean = true
 
   const onConnectionStringChange = async (): Promise<void> => {
@@ -83,6 +90,7 @@
   }
 
   onMount(async () => {
+    platform = window.BananasApi.getPlatform()
     const settings = await window.BananasApi.getSettings()
     microphoneActive = settings.isMicrophoneEnabledOnConnect
     connectButton.addEventListener('click', async () => {
@@ -103,17 +111,72 @@
     })
   })
   const onStartSessionButtonClick = async (): Promise<void> => {
-    await webRTCComponent.Setup()
+    let preparedLinuxSource: { name: string; label: string } | null = null
+    if (shareSystemAudio && platform === 'linux') {
+      try {
+        preparedLinuxSource = await window.BananasApi.prepareLinuxSystemAudio()
+      } catch (error) {
+        console.error(error)
+        Swal.fire({
+          icon: 'warning',
+          title: 'Could not prepare Linux system audio',
+          text: 'The AppImage needs pactl and a working PipeWire/PulseAudio default output monitor.'
+        })
+      }
+    }
+
+    await webRTCComponent.Setup(null, {
+      shareSystemAudio: shareSystemAudio && platform === 'win32'
+    })
     sessionStarted = true
     $navigationEnabled = false
     $isHosting = true
     hasAudioInput = webRTCComponent.HasAudioInput()
+    hasSystemAudioInput = webRTCComponent.HasSystemAudioInput()
+
+    if (shareSystemAudio && platform === 'linux' && preparedLinuxSource) {
+      systemAudioDevices = await webRTCComponent.GetSystemAudioInputDevices()
+      const preparedDevice = systemAudioDevices.find((device) =>
+        device.label
+          .replaceAll(/[_\s-]/g, '')
+          .toLowerCase()
+          .includes(preparedLinuxSource.label.replaceAll(/[_\s-]/g, '').toLowerCase())
+      )
+      if (preparedDevice) {
+        selectedSystemAudioDeviceId = preparedDevice.deviceId
+        await selectSystemAudioDevice()
+      }
+    } else if (shareSystemAudio && !hasSystemAudioInput) {
+      systemAudioDevices = await webRTCComponent.GetSystemAudioInputDevices()
+    }
+    systemAudioActive = webRTCComponent.IsSystemAudioActive()
+  }
+  const selectSystemAudioDevice = async (): Promise<void> => {
+    if (!selectedSystemAudioDeviceId) return
+    systemAudioDeviceIsLoading = true
+    hasSystemAudioInput = await webRTCComponent.SetSystemAudioDevice(selectedSystemAudioDeviceId)
+    systemAudioActive = webRTCComponent.IsSystemAudioActive()
+    systemAudioDeviceIsLoading = false
+
+    if (!hasSystemAudioInput) {
+      Swal.fire({
+        icon: 'error',
+        title: 'System audio source unavailable',
+        text: 'Choose a PipeWire/PulseAudio monitor or loopback input and try again.'
+      })
+    }
   }
   const reset = (): void => {
     $connectionString = ''
     cursorsActive = false
     displayStreamActive = false
     microphoneActive = true
+    shareSystemAudio = false
+    hasSystemAudioInput = false
+    systemAudioActive = false
+    systemAudioDevices = []
+    selectedSystemAudioDeviceId = ''
+    systemAudioDeviceIsLoading = false
     isStreaming = false
     sessionStarted = false
     connectionStringIsValid = null
@@ -123,6 +186,7 @@
   }
   const onDisconnectClick = async (): Promise<void> => {
     await webRTCComponent.Disconnect()
+    await window.BananasApi.releaseLinuxSystemAudio()
     reset()
   }
   const onMicrophoneToggle = async (): Promise<void> => {
@@ -137,6 +201,10 @@
       window.BananasApi.toggleRemoteCursors(cursorsActive)
       webRTCComponent.ToggleRemoteCursors(cursorsActive)
     }
+  }
+  const onSystemAudioToggle = (): void => {
+    webRTCComponent.ToggleSystemAudio()
+    systemAudioActive = webRTCComponent.IsSystemAudioActive()
   }
 </script>
 
@@ -177,6 +245,17 @@
               </span>
             </button>
           {/if}
+          {#if hasSystemAudioInput}
+            <button
+              title={systemAudioActive ? 'System audio active' : 'System audio muted'}
+              class="button {systemAudioActive ? 'is-success' : 'is-danger'}"
+              on:click={onSystemAudioToggle}
+            >
+              <span class="icon">
+                <i class="fas {systemAudioActive ? 'fa-volume-high' : 'fa-volume-xmark'}"></i>
+              </span>
+            </button>
+          {/if}
           <button
             title={cursorsActive ? L.remote_cursors_enabled() : L.remote_cursors_disabled()}
             class="button {cursorsActive ? 'is-success' : 'is-danger'} {!displayStreamActive
@@ -201,6 +280,19 @@
     </div>
   </div>
   <div class="fixed-grid has-2-cols">
+    {#if platform === 'win32' || platform === 'linux'}
+      <div class="field {sessionStarted ? 'is-hidden' : ''}">
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={shareSystemAudio} disabled={sessionStarted} />
+          Share system audio
+        </label>
+        <p class="help">
+          Windows uses automatic loopback capture. Linux creates a temporary PipeWire/PulseAudio
+          source for the default output.
+        </p>
+      </div>
+    {/if}
+
     <div class="grid">
       <div class="cell">
         <button
@@ -241,6 +333,39 @@
         </button>
       </div>
     </div>
+
+    {#if sessionStarted && !isStreaming && shareSystemAudio && systemAudioDevices.length > 0}
+      <div class="field">
+        <label class="label" for="system_audio_source">System audio source</label>
+        <div class="control">
+          <div class="select is-fullwidth {systemAudioDeviceIsLoading ? 'is-loading' : ''}">
+            <select
+              id="system_audio_source"
+              bind:value={selectedSystemAudioDeviceId}
+              on:change={selectSystemAudioDevice}
+            >
+              <option value="">Choose a monitor or loopback source</option>
+              {#each systemAudioDevices as device, index}
+                <option value={device.deviceId}>
+                  {device.label || `Audio input ${index + 1}`}
+                </option>
+              {/each}
+            </select>
+          </div>
+        </div>
+        <p class="help">
+          Normally Linux selects “hearBananas System Audio” automatically. If needed, choose an
+          existing virtual or loopback input here.
+        </p>
+      </div>
+    {/if}
+
+    {#if sessionStarted && !isStreaming && shareSystemAudio && !hasSystemAudioInput && systemAudioDevices.length === 0}
+      <div class="notification is-warning is-light">
+        No system-audio source was detected. Make sure pactl can access the default PipeWire or
+        PulseAudio output monitor, then cancel and start the session again.
+      </div>
+    {/if}
 
     <div class="field has-addons {!sessionStarted || isStreaming ? 'is-hidden' : ''}">
       <div class="control has-icons-left has-icons-right">

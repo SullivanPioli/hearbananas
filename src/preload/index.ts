@@ -26,6 +26,9 @@ type IceServer = {
 }
 
 const BananasApi = {
+  getPlatform: (): NodeJS.Platform => {
+    return process.platform
+  },
   getAppVersion: async (): Promise<string> => {
     return await ipcRenderer.invoke('getAppVersion')
   },
@@ -63,6 +66,15 @@ const BananasApi = {
     y: number
   }): Promise<void> => {
     ipcRenderer.invoke('updateRemoteCursor', state)
+  },
+  prepareLinuxSystemAudio: async (): Promise<{
+    name: string
+    label: string
+  } | null> => {
+    return await ipcRenderer.invoke('prepareLinuxSystemAudio')
+  },
+  releaseLinuxSystemAudio: async (): Promise<void> => {
+    await ipcRenderer.invoke('releaseLinuxSystemAudio')
   }
 }
 
