@@ -17,6 +17,30 @@ const runPactl = (args: string[]): Promise<string> => {
   })
 }
 
+const getDefaultMonitorSourceName = async (): Promise<string> => {
+  const defaultSink = await runPactl(['get-default-sink'])
+  if (!defaultSink) {
+    throw new Error('PulseAudio/PipeWire did not report a default output sink')
+  }
+
+  const expectedMonitor = `${defaultSink}.monitor`
+  const sources = await runPactl(['list', 'short', 'sources'])
+  const sourceNames = sources
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/)[1])
+    .filter((name): name is string => Boolean(name))
+
+  const exactMonitor = sourceNames.find((name) => name === expectedMonitor)
+  if (exactMonitor) return exactMonitor
+
+  const matchingMonitor = sourceNames.find(
+    (name) => name.endsWith('.monitor') && name.includes(defaultSink)
+  )
+  if (matchingMonitor) return matchingMonitor
+
+  throw new Error(`No monitor source was found for the default output sink “${defaultSink}”`)
+}
+
 const unloadStaleSystemAudioModules = async (): Promise<void> => {
   const modules = await runPactl(['list', 'short', 'modules'])
   const staleModuleIds = modules
@@ -47,13 +71,21 @@ export const prepareLinuxSystemAudio = async (): Promise<PreparedSystemAudioSour
   await releaseLinuxSystemAudio()
   await unloadStaleSystemAudioModules()
 
+  const monitorSourceName = await getDefaultMonitorSourceName()
+
   systemAudioModuleId = await runPactl([
     'load-module',
     'module-remap-source',
-    'master=@DEFAULT_MONITOR@',
+    `master=${monitorSourceName}`,
     `source_name=${SYSTEM_AUDIO_SOURCE_NAME}`,
     `source_properties=device.description=${SYSTEM_AUDIO_SOURCE_DESCRIPTION}`
   ])
+
+  const sources = await runPactl(['list', 'short', 'sources'])
+  if (!sources.split('\n').some((line) => line.includes(SYSTEM_AUDIO_SOURCE_NAME))) {
+    await releaseLinuxSystemAudio()
+    throw new Error('The hearBananas system-audio source was created but did not become available')
+  }
 
   return {
     name: SYSTEM_AUDIO_SOURCE_NAME,
