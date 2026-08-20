@@ -6,3 +6,5 @@ out
 .nvim
 .svelte-kit
 .vite
+native/windows-system-audio/build
+resources/bin

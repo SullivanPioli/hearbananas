@@ -7,6 +7,7 @@ import { windowStateKeeper } from './stateKeeper'
 import { ipcMainHandlersInit } from './ipcMainHandlers'
 import { isInProductionMode } from './utils'
 import { releaseLinuxSystemAudioSync } from './systemAudio'
+import { releaseWindowsSystemAudioSync } from './windowsSystemAudio'
 
 const CUSTOM_PROTOCOL = 'bananas'
 
@@ -130,4 +131,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   releaseLinuxSystemAudioSync()
+  releaseWindowsSystemAudioSync()
 })

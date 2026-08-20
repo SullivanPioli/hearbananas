@@ -3,11 +3,13 @@
   import type { BananasRemoteCursorData, SettingsData } from './BananasTypes'
   import { getConnectionString, ConnectionType } from './Utils'
   import { getRTCPeerConnectionConfig } from './Config'
+  import windowsSystemAudioProcessorUrl from './windowsSystemAudioProcessor.js?worker&url'
 
   export let connectionState: string = 'disconnected'
   export let hasRemoteAudio = false
   export let remoteAudioActive = false
   export let remoteAudioPlaybackBlocked = false
+  export let systemAudioCaptureError = ''
 
   type SetupOptions = {
     shareSystemAudio?: boolean
@@ -30,6 +32,9 @@
   let stream: MediaStream | null = null
   let audioElement: HTMLAudioElement | null = null
   let userSettings: SettingsData | null = null
+  let windowsSystemAudioContext: AudioContext | null = null
+  let windowsSystemAudioNode: AudioWorkletNode | null = null
+  let windowsSystemAudioDestination: MediaStreamAudioDestinationNode | null = null
 
   const remoteMouseCursorPositionsChannelIsReady = (): boolean => {
     if (!remoteMouseCursorPositionsChannel) return false
@@ -139,6 +144,72 @@
       return false
     }
   }
+  export async function StartWindowsFilteredSystemAudio(): Promise<string> {
+    if (!pc || !systemAudioSender) {
+      throw new Error('The WebRTC system-audio sender is not ready')
+    }
+
+    await stopSystemAudioStream()
+    systemAudioCaptureError = ''
+    const pendingPcmBuffers: ArrayBuffer[] = []
+    const sendPcmToWorklet = (buffer: ArrayBuffer): void => {
+      if (windowsSystemAudioNode) {
+        windowsSystemAudioNode.port.postMessage(buffer, [buffer])
+        return
+      }
+      if (pendingPcmBuffers.length >= 64) pendingPcmBuffers.shift()
+      pendingPcmBuffers.push(buffer)
+    }
+
+    window.BananasApi.onWindowsSystemAudioData((data) => {
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+      const copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+      sendPcmToWorklet(copy.buffer)
+    })
+    window.BananasApi.onWindowsSystemAudioError((message) => {
+      systemAudioCaptureError = message
+      for (const track of systemAudioStream?.getAudioTracks() ?? []) {
+        track.enabled = false
+      }
+    })
+
+    try {
+      const info = await window.BananasApi.prepareWindowsSystemAudio()
+      if (!info) throw new Error('Windows filtered-audio capture is unavailable')
+
+      windowsSystemAudioContext = new AudioContext({
+        latencyHint: 'interactive',
+        sampleRate: info.sampleRate
+      })
+      await windowsSystemAudioContext.audioWorklet.addModule(windowsSystemAudioProcessorUrl)
+      windowsSystemAudioNode = new AudioWorkletNode(
+        windowsSystemAudioContext,
+        'hearbananas-windows-system-audio',
+        {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2]
+        }
+      )
+      windowsSystemAudioDestination = windowsSystemAudioContext.createMediaStreamDestination()
+      windowsSystemAudioNode.connect(windowsSystemAudioDestination)
+      await windowsSystemAudioContext.resume()
+
+      for (const buffer of pendingPcmBuffers.splice(0)) {
+        windowsSystemAudioNode.port.postMessage(buffer, [buffer])
+      }
+
+      systemAudioStream = windowsSystemAudioDestination.stream
+      const [track] = systemAudioStream.getAudioTracks()
+      if (!track) throw new Error('Windows filtered-audio capture did not create an audio track')
+      await systemAudioSender.replaceTrack(track)
+      return info.excludedApplication
+    } catch (error) {
+      await stopSystemAudioStream()
+      throw error
+    }
+  }
   export function ToggleRemoteCursors(enabled: boolean): boolean {
     if (!remoteMouseCursorPositionsChannel) return false
     if (remoteMouseCursorPositionsChannel.readyState !== 'open') return false
@@ -211,6 +282,18 @@
     return [...(stream?.getAudioTracks() ?? []), ...(systemAudioStream?.getAudioTracks() ?? [])]
   }
 
+  const stopWindowsSystemAudioBridge = async (): Promise<void> => {
+    window.BananasApi.removeWindowsSystemAudioListeners()
+    windowsSystemAudioNode?.disconnect()
+    windowsSystemAudioNode = null
+    windowsSystemAudioDestination = null
+    if (windowsSystemAudioContext) {
+      await windowsSystemAudioContext.close().catch(errorHander)
+      windowsSystemAudioContext = null
+    }
+    await window.BananasApi.releaseWindowsSystemAudio().catch(errorHander)
+  }
+
   const stopSystemAudioStream = async (): Promise<void> => {
     if (systemAudioSender?.track) {
       await systemAudioSender.replaceTrack(null).catch(errorHander)
@@ -221,6 +304,7 @@
       }
       systemAudioStream = null
     }
+    await stopWindowsSystemAudioBridge()
   }
 
   export async function Setup(
@@ -232,6 +316,7 @@
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
+    systemAudioCaptureError = ''
     audioElement = options.remoteAudioElement ?? document.createElement('audio')
     audioElement.autoplay = true
     audioElement.muted = false
@@ -437,6 +522,7 @@
       hasRemoteAudio = false
       remoteAudioActive = false
       remoteAudioPlaybackBlocked = false
+      systemAudioCaptureError = ''
     } catch (e) {
       errorHander(e)
     }

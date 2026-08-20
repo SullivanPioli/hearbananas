@@ -67,14 +67,41 @@ const BananasApi = {
   }): Promise<void> => {
     ipcRenderer.invoke('updateRemoteCursor', state)
   },
-  prepareLinuxSystemAudio: async (): Promise<{
+  prepareLinuxSystemAudio: async (options?: {
+    excludeDiscordVesktop?: boolean
+  }): Promise<{
     name: string
     label: string
+    excludesDiscordVesktop: boolean
   } | null> => {
-    return await ipcRenderer.invoke('prepareLinuxSystemAudio')
+    return await ipcRenderer.invoke('prepareLinuxSystemAudio', options)
   },
   releaseLinuxSystemAudio: async (): Promise<void> => {
     await ipcRenderer.invoke('releaseLinuxSystemAudio')
+  },
+  prepareWindowsSystemAudio: async (): Promise<{
+    sampleRate: number
+    channels: number
+    sampleFormat: 's16le'
+    excludedApplication: string
+    excludedPid: number
+  } | null> => {
+    return await ipcRenderer.invoke('prepareWindowsSystemAudio')
+  },
+  releaseWindowsSystemAudio: async (): Promise<void> => {
+    await ipcRenderer.invoke('releaseWindowsSystemAudio')
+  },
+  onWindowsSystemAudioData: (callback: (data: Uint8Array) => void): void => {
+    ipcRenderer.removeAllListeners('windowsSystemAudioData')
+    ipcRenderer.on('windowsSystemAudioData', (_, data: Uint8Array) => callback(data))
+  },
+  onWindowsSystemAudioError: (callback: (message: string) => void): void => {
+    ipcRenderer.removeAllListeners('windowsSystemAudioError')
+    ipcRenderer.on('windowsSystemAudioError', (_, message: string) => callback(message))
+  },
+  removeWindowsSystemAudioListeners: (): void => {
+    ipcRenderer.removeAllListeners('windowsSystemAudioData')
+    ipcRenderer.removeAllListeners('windowsSystemAudioError')
   }
 }
 

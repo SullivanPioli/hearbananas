@@ -1,0 +1,33 @@
+---
+name: Windows System Audio Check
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-system-audio-check.yaml'
+      - 'electron-builder.yml'
+      - 'native/windows-system-audio/**'
+      - 'package.json'
+      - 'scripts/build-windows-audio.mjs'
+      - 'scripts/build.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-helper:
+    name: Build native helper
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compile Windows system-audio helper
+        run: node ./scripts/build-windows-audio.mjs
+      - name: Verify packaged helper input
+        shell: pwsh
+        run: |
+          $helper = 'resources/bin/win32-x64/hearbananas-system-audio.exe'
+          if (-not (Test-Path $helper)) {
+            throw "Missing compiled helper at $helper"
+          }

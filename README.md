@@ -37,10 +37,16 @@ brew install --cask bananas
 
 When hosting a session, enable **Share system audio** before starting it.
 
-- **Windows:** the app uses Electron's native loopback capture. No virtual audio device is
-  required.
-- **Linux:** the app uses `pactl` to expose the default PipeWire or PulseAudio output monitor as a
-  temporary `hearBananas System Audio` input. It is selected automatically when available.
+- **Windows:** with **Keep Discord/Vesktop out of the stream** enabled, a bundled WASAPI helper
+  captures the system mix while excluding the running Discord, Discord Canary/PTB, or Vesktop
+  process tree. The call remains audible locally and no virtual audio device is required. Exactly
+  one independent Discord-family/Vesktop process tree must be running. Turning the option off uses
+  Electron's ordinary whole-system loopback instead. Microsoft documents process-loopback capture
+  for Windows build 20348 or later; on an older or unsupported build, use the whole-system fallback.
+- **Linux:** the app uses `pactl` to expose a temporary `hearBananas System Audio` input. With
+  **Keep Discord/Vesktop out of the stream** enabled, it creates a separate outgoing mix, routes
+  normal game/video audio through it, and lets Discord, Discord Canary/PTB, Vesktop, and
+  hearBananas playback bypass it. Bypassed apps remain audible through the same real output.
 - **AppImage:** system audio uses the same PipeWire/PulseAudio devices exposed by the host system,
   so the AppImage does not need a bundled audio server or native Node module. The host must provide
   `pactl` (on Arch Linux, it is supplied by the `libpulse` package).
@@ -52,7 +58,15 @@ audio** warning or the volume button in the session toolbar.
 
 If automatic Linux setup fails, check that `pactl info` and `pactl get-default-sink` work and that
 the default sink has a matching `.monitor` source in `pactl list short sources`. Existing virtual
-or loopback inputs can be selected manually in the app.
-Whole-system loopback can also capture remote participant audio played by Bananas. If that causes an
-echo, mute participant microphone return or route Bananas playback to an output that is not being
-captured.
+or loopback inputs can be selected manually in the app. Disconnecting restores streams to their
+previous outputs and removes the temporary mix. If the output device changes during a session,
+cancel and start a new session so the mix can follow the new default output.
+
+The exclusions recognize installed Discord-family desktop applications from their process or audio
+stream identity. Discord running inside a general web browser is seen as browser audio and is
+therefore not excluded. On Windows, filtered capture fails closed if no supported application is
+running or if multiple independent Discord/Vesktop process trees are detected; cancel the session
+and correct that condition, or turn the exclusion option off if whole-system loopback is acceptable.
+
+Building the Windows installer from source requires CMake and the Visual Studio C++ toolchain. The
+Windows build script compiles the helper first and packages it beside the Electron application.

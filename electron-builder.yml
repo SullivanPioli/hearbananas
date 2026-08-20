@@ -10,12 +10,16 @@ files:
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!resources/bin/**'
 asarUnpack:
   - resources/**
 afterSign: scripts/notarize.js
 win:
   executableName: bananas
   icon: build/icon.ico
+  extraResources:
+    - from: resources/bin/win32-x64/hearbananas-system-audio.exe
+      to: hearbananas-system-audio.exe
 nsis:
   artifactName: ${name}-setup_${arch}.${ext}
   shortcutName: ${productName}
