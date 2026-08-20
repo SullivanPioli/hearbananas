@@ -33,11 +33,23 @@ declare global {
         iceServers: IceServer[]
       }>
       getAppVersion: () => Promise<string>
-      prepareLinuxSystemAudio: () => Promise<{
+      prepareLinuxSystemAudio: (options?: { excludeDiscordVesktop?: boolean }) => Promise<{
         name: string
         label: string
+        excludesDiscordVesktop: boolean
       } | null>
       releaseLinuxSystemAudio: () => Promise<void>
+      prepareWindowsSystemAudio: () => Promise<{
+        sampleRate: number
+        channels: number
+        sampleFormat: 's16le'
+        excludedApplication: string
+        excludedPid: number
+      } | null>
+      releaseWindowsSystemAudio: () => Promise<void>
+      onWindowsSystemAudioData: (callback: (data: Uint8Array) => void) => void
+      onWindowsSystemAudioError: (callback: (message: string) => void) => void
+      removeWindowsSystemAudioListeners: () => void
     }
   }
 }

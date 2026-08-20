@@ -27,6 +27,9 @@
   let connectionString = useHostUrl()
   let hasAudioInput = false
   let shareSystemAudio = false
+  let excludeDiscordVesktop = true
+  let discordVesktopExclusionActive = false
+  let windowsExcludedApplication = ''
   let hasSystemAudioInput = false
   let systemAudioActive = false
   let systemAudioDevices: MediaDeviceInfo[] = []
@@ -37,6 +40,8 @@
   let hasRemoteAudio = false
   let remoteAudioActive = false
   let remoteAudioPlaybackBlocked = false
+  let systemAudioCaptureError = ''
+  let lastSystemAudioCaptureError = ''
   let visualizerIsActive: boolean = true
 
   const onConnectionStringChange = async (): Promise<void> => {
@@ -85,8 +90,22 @@
     }
   }
 
+  const onSystemAudioCaptureErrorChange = (): void => {
+    if (!systemAudioCaptureError || systemAudioCaptureError === lastSystemAudioCaptureError) return
+    lastSystemAudioCaptureError = systemAudioCaptureError
+    hasSystemAudioInput = false
+    systemAudioActive = false
+    systemAudioSignalActive = false
+    Swal.fire({
+      icon: 'error',
+      title: 'System audio capture stopped',
+      text: systemAudioCaptureError
+    })
+  }
+
   $: $connectionString, onConnectionStringChange()
   $: connectionState, onConnectionStateChange()
+  $: systemAudioCaptureError, onSystemAudioCaptureErrorChange()
 
   const toggleRemoteCursors = (): void => {
     cursorsActive = !cursorsActive
@@ -132,11 +151,19 @@
     })
   })
   const onStartSessionButtonClick = async (): Promise<void> => {
-    let preparedLinuxSource: { name: string; label: string } | null = null
+    let preparedLinuxSource: {
+      name: string
+      label: string
+      excludesDiscordVesktop: boolean
+    } | null = null
     if (shareSystemAudio && platform === 'linux') {
       try {
-        preparedLinuxSource = await window.BananasApi.prepareLinuxSystemAudio()
+        preparedLinuxSource = await window.BananasApi.prepareLinuxSystemAudio({
+          excludeDiscordVesktop
+        })
+        discordVesktopExclusionActive = preparedLinuxSource?.excludesDiscordVesktop === true
       } catch (error) {
+        discordVesktopExclusionActive = false
         console.error(error)
         Swal.fire({
           icon: 'warning',
@@ -150,7 +177,7 @@
     }
 
     await webRTCComponent.Setup(null, {
-      shareSystemAudio: shareSystemAudio && platform === 'win32',
+      shareSystemAudio: shareSystemAudio && platform === 'win32' && !excludeDiscordVesktop,
       remoteAudioElement
     })
     sessionStarted = true
@@ -159,13 +186,32 @@
     hasAudioInput = webRTCComponent.HasAudioInput()
     hasSystemAudioInput = webRTCComponent.HasSystemAudioInput()
 
-    if (shareSystemAudio && platform === 'linux' && preparedLinuxSource) {
+    if (shareSystemAudio && platform === 'win32' && excludeDiscordVesktop) {
+      try {
+        windowsExcludedApplication = await webRTCComponent.StartWindowsFilteredSystemAudio()
+        discordVesktopExclusionActive = true
+        hasSystemAudioInput = webRTCComponent.HasSystemAudioInput()
+      } catch (error) {
+        windowsExcludedApplication = ''
+        discordVesktopExclusionActive = false
+        hasSystemAudioInput = false
+        console.error(error)
+        Swal.fire({
+          icon: 'warning',
+          title: 'Could not exclude Discord/Vesktop audio',
+          text:
+            error instanceof Error
+              ? error.message
+              : 'Windows filtered-audio capture could not start.'
+        })
+      }
+    } else if (shareSystemAudio && platform === 'linux' && preparedLinuxSource) {
       const preparedDevice = await waitForSystemAudioDevice(preparedLinuxSource.label)
       if (preparedDevice) {
         selectedSystemAudioDeviceId = preparedDevice.deviceId
         await selectSystemAudioDevice()
       }
-    } else if (shareSystemAudio && !hasSystemAudioInput) {
+    } else if (shareSystemAudio && platform === 'linux' && !hasSystemAudioInput) {
       systemAudioDevices = await webRTCComponent.GetSystemAudioInputDevices()
     }
     systemAudioActive = webRTCComponent.IsSystemAudioActive()
@@ -192,6 +238,8 @@
     displayStreamActive = false
     microphoneActive = true
     shareSystemAudio = false
+    discordVesktopExclusionActive = false
+    windowsExcludedApplication = ''
     hasSystemAudioInput = false
     systemAudioActive = false
     systemAudioDevices = []
@@ -201,6 +249,8 @@
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
+    systemAudioCaptureError = ''
+    lastSystemAudioCaptureError = ''
     isStreaming = false
     sessionStarted = false
     connectionStringIsValid = null
@@ -241,6 +291,7 @@
   bind:hasRemoteAudio
   bind:remoteAudioActive
   bind:remoteAudioPlaybackBlocked
+  bind:systemAudioCaptureError
   bind:this={webRTCComponent}
 />
 <audio bind:this={remoteAudioElement} autoplay class="is-hidden"></audio>
@@ -346,8 +397,21 @@
           Share system audio
         </label>
         <p class="help">
-          Windows uses automatic loopback capture. Linux creates a temporary PipeWire/PulseAudio
-          source for the default output.
+          Windows uses native WASAPI capture. Linux creates a temporary PipeWire/PulseAudio outgoing
+          mix.
+        </p>
+      </div>
+    {/if}
+
+    {#if (platform === 'linux' || platform === 'win32') && shareSystemAudio}
+      <div class="field {sessionStarted ? 'is-hidden' : ''}">
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={excludeDiscordVesktop} disabled={sessionStarted} />
+          Keep Discord/Vesktop out of the stream
+        </label>
+        <p class="help">
+          Discord, Discord Canary/PTB, and Vesktop remain audible to you but are removed from the
+          outgoing stream. On Windows, exactly one of those applications must be running.
         </p>
       </div>
     {/if}
@@ -422,8 +486,13 @@
 
     {#if sessionStarted && !isStreaming && shareSystemAudio && !hasSystemAudioInput && systemAudioDevices.length === 0}
       <div class="notification is-warning is-light">
-        No system-audio source was detected. Make sure pactl can access the default PipeWire or
-        PulseAudio output monitor, then cancel and start the session again.
+        {#if platform === 'linux'}
+          No system-audio source was detected. Make sure pactl can access the default PipeWire or
+          PulseAudio output monitor, then cancel and start the session again.
+        {:else}
+          Filtered Windows audio is not ready. Cancel and retry with one Discord/Vesktop instance
+          running, or turn the exclusion option off to use whole-system loopback.
+        {/if}
       </div>
     {/if}
 
@@ -434,6 +503,10 @@
         {:else}
           The system-audio track is ready, but no sound is currently detected. Play some game or
           video audio and confirm that the volume icon starts moving before connecting.
+        {/if}
+        {#if discordVesktopExclusionActive}
+          {windowsExcludedApplication || 'Discord/Vesktop'} audio is excluded from the outgoing mix but
+          remains audible locally.
         {/if}
       </div>
     {/if}

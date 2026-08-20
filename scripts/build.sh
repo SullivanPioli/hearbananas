@@ -12,7 +12,9 @@ update_package_json_version() {
 update_package_json_version
 
 build_windows() {
-  bun run build && ./node_modules/.bin/electron-builder --win --publish never
+  bun run ./scripts/build-windows-audio.mjs && \
+    bun run build && \
+    ./node_modules/.bin/electron-builder --win --publish never
 }
 
 build_linux() {

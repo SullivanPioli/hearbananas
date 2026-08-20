@@ -21,7 +21,7 @@
     "build": "bun run typecheck && electron-vite build",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "bun run build && electron-builder --dir",
-    "build:windows": "bun run build && electron-builder --win --publish never",
+    "build:windows": "bun run ./scripts/build-windows-audio.mjs && bun run build && electron-builder --win --publish never",
     "build:macos": "./scripts/build.sh PLATFORM=macos",
     "build:linux": "./scripts/build.sh PLATFORM=linux",
     "build:linux-arm64": "./scripts/build.sh PLATFORM=linux-arm64",

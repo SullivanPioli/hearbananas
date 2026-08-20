@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron'
 import { createCursorsWindow } from './cursors'
 import { settingsKeeper } from './stateKeeper'
 import { prepareLinuxSystemAudio, releaseLinuxSystemAudio } from './systemAudio'
+import { prepareWindowsSystemAudio, releaseWindowsSystemAudio } from './windowsSystemAudio'
 
 export const ipcMainHandlersInit = (): void => {
   const availableDimensions = screen.getPrimaryDisplay().workAreaSize
@@ -56,10 +57,21 @@ export const ipcMainHandlersInit = (): void => {
   ipcMain.handle('getAppVersion', (): string => {
     return app.getVersion()
   })
-  ipcMain.handle('prepareLinuxSystemAudio', async () => {
-    return await prepareLinuxSystemAudio()
-  })
+  ipcMain.handle(
+    'prepareLinuxSystemAudio',
+    async (_, options?: { excludeDiscordVesktop?: unknown }) => {
+      return await prepareLinuxSystemAudio({
+        excludeDiscordVesktop: options?.excludeDiscordVesktop === true
+      })
+    }
+  )
   ipcMain.handle('releaseLinuxSystemAudio', async (): Promise<void> => {
     await releaseLinuxSystemAudio()
+  })
+  ipcMain.handle('prepareWindowsSystemAudio', async (event) => {
+    return await prepareWindowsSystemAudio(event.sender)
+  })
+  ipcMain.handle('releaseWindowsSystemAudio', async (): Promise<void> => {
+    await releaseWindowsSystemAudio()
   })
 }
