@@ -113,7 +113,7 @@ app.whenReady().then(async () => {
   ipcMainHandlersInit()
 
   await createWindow()
-  const coldStartUrl = process.argv.find((arg) => arg.startsWith(CUSTOM_PROTOCOL + '://'))
+  const coldStartUrl = process.argv.find((arg) => arg.startsWith(CUSTOM_PROTOCOL + ':'))
   if (coldStartUrl) {
     sendOpenBananasUrlToRenderer(coldStartUrl)
   }

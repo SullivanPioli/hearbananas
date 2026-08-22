@@ -33,6 +33,23 @@ Or if you are on Mac you can install it via homebrew with
 brew install --cask bananas
 ```
 
+## Connecting friends
+
+hearBananas uses short, compressed, serverless connection strings. The host clicks **Copy a new
+friend invitation** once per friend and sends each person a different invitation. Each friend joins
+with their invitation, copies the answer string, and sends that answer back. The host can paste and
+add the returned answers in any order while the stream stays open.
+
+A host can have up to eight pending invitations or connected friends in one session. Invitations
+are single-use because every friend has a separate encrypted peer-to-peer WebRTC connection. The
+host's upload bandwidth grows with every connected friend, so lower the capture resolution or
+frame rate if several viewers experience stuttering.
+
+New connection strings use a compact format designed to fit under Discord's 2,000-character
+message limit on ordinary networks. The app displays the exact length after copying. Unusually
+large ICE/TURN configurations can still exceed the limit; in that case, send the string as a text
+file without editing it.
+
 ## System audio sharing
 
 When hosting a session, enable **Share system audio** before starting it.

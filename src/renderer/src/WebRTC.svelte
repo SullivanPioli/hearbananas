@@ -1,11 +1,18 @@
 <script lang="ts">
   import type { RTCSessionDescriptionOptions } from './Utils'
   import type { BananasRemoteCursorData, SettingsData } from './BananasTypes'
-  import { getConnectionString, ConnectionType } from './Utils'
+  import {
+    createInvitationId,
+    getConnectionString,
+    getParticipantAudioSection,
+    ConnectionType
+  } from './Utils'
   import { getRTCPeerConnectionConfig } from './Config'
   import windowsSystemAudioProcessorUrl from './windowsSystemAudioProcessor.js?worker&url'
 
   export let connectionState: string = 'disconnected'
+  export let connectedParticipantCount = 0
+  export let pendingParticipantCount = 0
   export let hasRemoteAudio = false
   export let remoteAudioActive = false
   export let remoteAudioPlaybackBlocked = false
@@ -16,18 +23,30 @@
     remoteAudioElement?: HTMLAudioElement | null
   }
 
-  const errorHander = (e: unknown): void => {
-    console.error(e)
+  type HostPeer = {
+    invitationId: string
+    participantName: string
+    pc: RTCPeerConnection
+    systemAudioSender: RTCRtpSender
+    remoteAudioTracks: Set<MediaStreamTrack>
+  }
+
+  const ICE_GATHERING_TIMEOUT_MS = 10000
+  const MAX_HOST_PARTICIPANTS = 8
+
+  const errorHander = (error: unknown): void => {
+    console.error(error)
   }
 
   let remoteVideo: HTMLVideoElement | null = null
-  let pc: RTCPeerConnection | null = null
+  let participantPc: RTCPeerConnection | null = null
+  const hostPeers = new Map<string, HostPeer>()
+  let shuttingDown = false
   let remoteCursorPositionsEnabled = false
   let remoteMouseCursorPositionsChannel: RTCDataChannel | null = null
   let remoteCursorPingChannel: RTCDataChannel | null = null
   let audioStream: MediaStream | null = null
   let systemAudioStream: MediaStream | null = null
-  let systemAudioSender: RTCRtpSender | null = null
   let remoteAudioStream: MediaStream | null = null
   let stream: MediaStream | null = null
   let audioElement: HTMLAudioElement | null = null
@@ -37,63 +56,66 @@
   let windowsSystemAudioDestination: MediaStreamAudioDestinationNode | null = null
 
   const remoteMouseCursorPositionsChannelIsReady = (): boolean => {
-    if (!remoteMouseCursorPositionsChannel) return false
-    if (remoteMouseCursorPositionsChannel.readyState === 'open') return true
-    return false
+    return remoteMouseCursorPositionsChannel?.readyState === 'open'
   }
 
   const remoteCursorPingChannelIsReady = (): boolean => {
-    if (!remoteCursorPingChannel) return false
-    if (remoteCursorPingChannel.readyState === 'open') return true
-    return false
+    return remoteCursorPingChannel?.readyState === 'open'
   }
 
-  const setupDataChannel = (dc: RTCDataChannel): void => {
-    if (dc.label === 'remoteMouseCursorPositions') {
-      remoteMouseCursorPositionsChannel = dc
-      dc.onmessage = function (e: MessageEvent): void {
-        if (!remoteCursorPositionsEnabled) return
-        if (remoteVideo) return
-        const data = JSON.parse(e.data)
+  const setupDataChannel = (dataChannel: RTCDataChannel, participantSide: boolean): void => {
+    if (dataChannel.label === 'remoteMouseCursorPositions') {
+      if (participantSide) remoteMouseCursorPositionsChannel = dataChannel
+      dataChannel.onmessage = (event: MessageEvent): void => {
+        if (!remoteCursorPositionsEnabled || participantSide) return
+        const data = JSON.parse(event.data)
         window.BananasApi.updateRemoteCursor(data)
       }
     }
-    if (dc.label === 'remoteCursorPing') {
-      remoteCursorPingChannel = dc
-      dc.onmessage = function (e: MessageEvent): void {
-        if (!remoteCursorPositionsEnabled) return
-        if (remoteVideo) return
-        window.BananasApi.remoteCursorPing(e.data)
+    if (dataChannel.label === 'remoteCursorPing') {
+      if (participantSide) remoteCursorPingChannel = dataChannel
+      dataChannel.onmessage = (event: MessageEvent): void => {
+        if (!remoteCursorPositionsEnabled || participantSide) return
+        window.BananasApi.remoteCursorPing(event.data)
       }
     }
   }
+
   export function PingRemoteCursor(cursorId: string): void {
-    if (!remoteCursorPingChannelIsReady()) {
-      console.error('remoteCursorPingChannel not ready')
-      return
-    }
-    remoteCursorPingChannel.send(cursorId)
+    if (!remoteCursorPingChannelIsReady()) return
+    remoteCursorPingChannel?.send(cursorId)
   }
+
   export function UpdateRemoteCursor(cursorData: BananasRemoteCursorData): void {
-    if (!remoteMouseCursorPositionsChannelIsReady()) {
-      console.error('remoteMouseCursorPositionsChannel not ready')
-      return
-    }
-    remoteMouseCursorPositionsChannel.send(JSON.stringify(cursorData))
+    if (!remoteMouseCursorPositionsChannelIsReady()) return
+    remoteMouseCursorPositionsChannel?.send(JSON.stringify(cursorData))
   }
+
   export function HasAudioInput(): boolean {
     return audioStream !== null
   }
+
   export function GetAudioStream(): MediaStream | null {
     return audioStream
   }
-  export function HasSystemAudioInput(): boolean {
-    return getSystemAudioTracks().some((track) => track.readyState === 'live')
+
+  const getSystemAudioTracks = (): MediaStreamTrack[] => {
+    return [...(stream?.getAudioTracks() ?? []), ...(systemAudioStream?.getAudioTracks() ?? [])]
   }
+
+  const getLiveSystemAudioTrack = (): MediaStreamTrack | null => {
+    return getSystemAudioTracks().find((track) => track.readyState === 'live') ?? null
+  }
+
+  export function HasSystemAudioInput(): boolean {
+    return getLiveSystemAudioTrack() !== null
+  }
+
   export function GetSystemAudioStream(): MediaStream | null {
     const tracks = getSystemAudioTracks()
     return tracks.length > 0 ? new MediaStream(tracks) : null
   }
+
   export async function GetSystemAudioInputDevices(): Promise<MediaDeviceInfo[]> {
     const devices = await navigator.mediaDevices.enumerateDevices()
     const microphoneDeviceIds = new Set(
@@ -113,8 +135,17 @@
 
     return likelySystemAudioDevices.length > 0 ? likelySystemAudioDevices : audioInputDevices
   }
+
+  const replaceHostSystemAudioTrack = async (track: MediaStreamTrack | null): Promise<void> => {
+    await Promise.all(
+      [...hostPeers.values()].map(async (peer) => {
+        await peer.systemAudioSender.replaceTrack(track).catch(errorHander)
+      })
+    )
+  }
+
   export async function SetSystemAudioDevice(deviceId: string): Promise<boolean> {
-    if (!pc || !systemAudioSender || !deviceId) return false
+    if (remoteVideo || !deviceId) return false
 
     await stopSystemAudioStream()
     try {
@@ -133,21 +164,18 @@
         systemAudioStream = null
         return false
       }
-      await systemAudioSender.replaceTrack(track)
+      await replaceHostSystemAudioTrack(track)
       return track.readyState === 'live'
-    } catch (e) {
-      for (const track of systemAudioStream?.getTracks() ?? []) {
-        track.stop()
-      }
+    } catch (error) {
+      for (const track of systemAudioStream?.getTracks() ?? []) track.stop()
       systemAudioStream = null
-      errorHander(e)
+      errorHander(error)
       return false
     }
   }
+
   export async function StartWindowsFilteredSystemAudio(): Promise<string> {
-    if (!pc || !systemAudioSender) {
-      throw new Error('The WebRTC system-audio sender is not ready')
-    }
+    if (remoteVideo) throw new Error('Filtered system audio can only be started by the host')
 
     await stopSystemAudioStream()
     systemAudioCaptureError = ''
@@ -169,9 +197,7 @@
     })
     window.BananasApi.onWindowsSystemAudioError((message) => {
       systemAudioCaptureError = message
-      for (const track of systemAudioStream?.getAudioTracks() ?? []) {
-        track.enabled = false
-      }
+      for (const track of systemAudioStream?.getAudioTracks() ?? []) track.enabled = false
     })
 
     try {
@@ -203,19 +229,19 @@
       systemAudioStream = windowsSystemAudioDestination.stream
       const [track] = systemAudioStream.getAudioTracks()
       if (!track) throw new Error('Windows filtered-audio capture did not create an audio track')
-      await systemAudioSender.replaceTrack(track)
+      await replaceHostSystemAudioTrack(track)
       return info.excludedApplication
     } catch (error) {
       await stopSystemAudioStream()
       throw error
     }
   }
+
   export function ToggleRemoteCursors(enabled: boolean): boolean {
-    if (!remoteMouseCursorPositionsChannel) return false
-    if (remoteMouseCursorPositionsChannel.readyState !== 'open') return false
     remoteCursorPositionsEnabled = enabled
     return enabled
   }
+
   export async function EnableRemoteAudio(): Promise<boolean> {
     if (!audioElement || !hasRemoteAudio) return false
     audioElement.muted = false
@@ -231,6 +257,7 @@
       return false
     }
   }
+
   export async function ToggleRemoteAudio(): Promise<boolean> {
     if (!audioElement || !hasRemoteAudio) return false
     if (remoteAudioActive && !audioElement.muted) {
@@ -241,21 +268,17 @@
     return await EnableRemoteAudio()
   }
 
-  const ICE_GATHERING_TIMEOUT_MS = 10000
-
-  const waitForIceGatheringComplete = async (): Promise<void> => {
-    if (!pc) return
+  const waitForIceGatheringComplete = async (pc: RTCPeerConnection): Promise<void> => {
     if (pc.iceGatheringState === 'complete') return
     await new Promise<void>((resolve) => {
       const cleanup = (): void => {
-        pc?.removeEventListener('icegatheringstatechange', onStateChange)
+        pc.removeEventListener('icegatheringstatechange', onStateChange)
         clearTimeout(timeoutId)
       }
       const onStateChange = (): void => {
-        if (pc?.iceGatheringState === 'complete') {
-          cleanup()
-          resolve()
-        }
+        if (pc.iceGatheringState !== 'complete') return
+        cleanup()
+        resolve()
       }
       const timeoutId = setTimeout(() => {
         cleanup()
@@ -267,19 +290,176 @@
     })
   }
 
-  const addGuestAudioTracks = (): void => {
-    if (!pc || !audioStream || !userSettings) return
-    const senders = pc.getSenders()
-    for (const track of audioStream.getTracks()) {
-      track.enabled = userSettings.isMicrophoneEnabledOnConnect
-      if (!senders.some((sender) => sender.track?.id === track.id)) {
-        pc.addTrack(track, audioStream)
-      }
+  const configureCompactCodecs = (pc: RTCPeerConnection): void => {
+    for (const transceiver of pc.getTransceivers()) {
+      const kind = transceiver.receiver.track.kind
+      const capabilities = RTCRtpReceiver.getCapabilities(kind)
+      const codecs = capabilities?.codecs.filter((codec) => {
+        const mimeType = codec.mimeType.toLowerCase()
+        return kind === 'audio' ? mimeType === 'audio/opus' : mimeType === 'video/vp8'
+      })
+      if (codecs?.length) transceiver.setCodecPreferences(codecs)
     }
   }
 
-  const getSystemAudioTracks = (): MediaStreamTrack[] => {
-    return [...(stream?.getAudioTracks() ?? []), ...(systemAudioStream?.getAudioTracks() ?? [])]
+  const refreshRemoteAudioState = (): void => {
+    hasRemoteAudio =
+      remoteAudioStream?.getAudioTracks().some((track) => track.readyState === 'live') === true
+    if (!hasRemoteAudio) remoteAudioActive = false
+  }
+
+  const addRemoteAudioTrack = (track: MediaStreamTrack, peer?: HostPeer): void => {
+    if (!remoteAudioStream) return
+    if (!remoteAudioStream.getTracks().some((candidate) => candidate.id === track.id)) {
+      remoteAudioStream.addTrack(track)
+    }
+    peer?.remoteAudioTracks.add(track)
+    track.addEventListener(
+      'ended',
+      () => {
+        remoteAudioStream?.removeTrack(track)
+        peer?.remoteAudioTracks.delete(track)
+        refreshRemoteAudioState()
+      },
+      { once: true }
+    )
+    refreshRemoteAudioState()
+    void EnableRemoteAudio()
+  }
+
+  const addRemoteVideoTrack = (track: MediaStreamTrack): void => {
+    if (!remoteVideo) return
+    const videoStream =
+      remoteVideo.srcObject instanceof MediaStream ? remoteVideo.srcObject : new MediaStream()
+    if (!videoStream.getTracks().some((candidate) => candidate.id === track.id)) {
+      videoStream.addTrack(track)
+    }
+    remoteVideo.srcObject = videoStream
+  }
+
+  const updateHostPeerCounts = (): void => {
+    const activePeers = [...hostPeers.values()].filter(
+      (peer) => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed'
+    )
+    connectedParticipantCount = activePeers.filter(
+      (peer) => peer.pc.connectionState === 'connected'
+    ).length
+    pendingParticipantCount = activePeers.length - connectedParticipantCount
+  }
+
+  const closeHostPeer = (invitationId: string): void => {
+    const peer = hostPeers.get(invitationId)
+    if (!peer) return
+    hostPeers.delete(invitationId)
+    for (const track of peer.remoteAudioTracks) remoteAudioStream?.removeTrack(track)
+    peer.remoteAudioTracks.clear()
+    peer.pc.close()
+    refreshRemoteAudioState()
+    updateHostPeerCounts()
+  }
+
+  const configureHostPeerEvents = (peer: HostPeer): void => {
+    const { pc } = peer
+    pc.ontrack = (event): void => {
+      if (event.track.kind === 'audio') addRemoteAudioTrack(event.track, peer)
+    }
+    const onStateChange = (): void => {
+      if (shuttingDown) return
+      const state = pc.connectionState
+      if (state === 'connected') connectionState = 'connected'
+      if (state === 'failed') connectionState = 'failed'
+      if (state === 'closed') connectionState = 'closed'
+      updateHostPeerCounts()
+      if (state === 'failed' || state === 'closed') {
+        queueMicrotask(() => closeHostPeer(peer.invitationId))
+      }
+    }
+    pc.onconnectionstatechange = onStateChange
+    pc.oniceconnectionstatechange = (): void => {
+      if (!shuttingDown && pc.iceConnectionState === 'failed') connectionState = 'failed'
+    }
+  }
+
+  const createHostPeer = async (invitationId: string): Promise<HostPeer> => {
+    const pc = new RTCPeerConnection(await getRTCPeerConnectionConfig())
+    const systemAudioTrack = getLiveSystemAudioTrack()
+    const microphoneTrack =
+      audioStream?.getAudioTracks().find((track) => track.readyState === 'live') ?? null
+    const systemAudioTransceiver = pc.addTransceiver(systemAudioTrack ?? 'audio', {
+      direction: 'sendonly',
+      ...(systemAudioTrack ? { streams: [new MediaStream([systemAudioTrack])] } : {})
+    })
+    pc.addTransceiver(microphoneTrack ?? 'audio', {
+      direction: microphoneTrack ? 'sendrecv' : 'recvonly',
+      ...(microphoneTrack ? { streams: [audioStream as MediaStream] } : {})
+    })
+
+    for (const track of stream?.getVideoTracks() ?? []) {
+      pc.addTransceiver(track, {
+        direction: 'sendonly',
+        streams: [stream as MediaStream]
+      })
+    }
+
+    const peer: HostPeer = {
+      invitationId,
+      participantName: '',
+      pc,
+      systemAudioSender: systemAudioTransceiver.sender,
+      remoteAudioTracks: new Set()
+    }
+    hostPeers.set(invitationId, peer)
+    configureHostPeerEvents(peer)
+
+    const cursorPositionsChannel = pc.createDataChannel('remoteMouseCursorPositions')
+    const cursorPingChannel = pc.createDataChannel('remoteCursorPing')
+    setupDataChannel(cursorPositionsChannel, false)
+    setupDataChannel(cursorPingChannel, false)
+    configureCompactCodecs(pc)
+    updateHostPeerCounts()
+    return peer
+  }
+
+  const createParticipantPeer = async (): Promise<RTCPeerConnection> => {
+    const pc = new RTCPeerConnection(await getRTCPeerConnectionConfig())
+    pc.ondatachannel = (event: RTCDataChannelEvent): void => {
+      setupDataChannel(event.channel, true)
+    }
+    pc.ontrack = (event): void => {
+      if (event.track.kind === 'video') addRemoteVideoTrack(event.track)
+      if (event.track.kind === 'audio') addRemoteAudioTrack(event.track)
+    }
+    pc.oniceconnectionstatechange = (): void => {
+      if (!shuttingDown) connectionState = pc.iceConnectionState
+    }
+    participantPc = pc
+    return pc
+  }
+
+  const addGuestAudioTracks = async (
+    pc: RTCPeerConnection,
+    remoteOfferSdp: string
+  ): Promise<void> => {
+    if (!audioStream || !userSettings) return
+    const microphoneTrack = audioStream.getAudioTracks()[0]
+    if (!microphoneTrack) return
+
+    microphoneTrack.enabled = userSettings.isMicrophoneEnabledOnConnect
+    const participantAudioSection = getParticipantAudioSection(remoteOfferSdp)
+    const microphoneTransceiver = participantAudioSection
+      ? pc
+          .getTransceivers()
+          .find(
+            (transceiver) =>
+              transceiver.mid === participantAudioSection.mid &&
+              transceiver.receiver.track.kind === 'audio'
+          )
+      : undefined
+    if (!microphoneTransceiver) {
+      throw new Error('The host invitation does not include a participant-audio channel')
+    }
+    microphoneTransceiver.direction = participantAudioSection.direction
+    await microphoneTransceiver.sender.replaceTrack(microphoneTrack)
   }
 
   const stopWindowsSystemAudioBridge = async (): Promise<void> => {
@@ -295,24 +475,23 @@
   }
 
   const stopSystemAudioStream = async (): Promise<void> => {
-    if (systemAudioSender?.track) {
-      await systemAudioSender.replaceTrack(null).catch(errorHander)
-    }
+    await replaceHostSystemAudioTrack(null)
     if (systemAudioStream) {
-      for (const track of systemAudioStream.getTracks()) {
-        track.stop()
-      }
+      for (const track of systemAudioStream.getTracks()) track.stop()
       systemAudioStream = null
     }
     await stopWindowsSystemAudioBridge()
   }
 
   export async function Setup(
-    v: HTMLVideoElement = null,
+    video: HTMLVideoElement = null,
     options: SetupOptions = {}
   ): Promise<void> {
     userSettings = await window.BananasApi.getSettings()
-    remoteVideo = v
+    remoteVideo = video
+    shuttingDown = false
+    connectedParticipantCount = 0
+    pendingParticipantCount = 0
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
@@ -332,183 +511,140 @@
     audioElement.onvolumechange = (): void => {
       remoteAudioActive = !audioElement?.muted && !audioElement?.paused
     }
-    if (pc) {
-      pc.close()
-      pc = null
-    }
-    pc = new RTCPeerConnection(await getRTCPeerConnectionConfig())
-    systemAudioSender = remoteVideo
-      ? null
-      : pc.addTransceiver('audio', { direction: 'sendonly' }).sender
-    pc.ondatachannel = (e: RTCDataChannelEvent): void => {
-      if (e.channel.label === 'remoteMouseCursorPositions') {
-        setupDataChannel(e.channel)
-      }
-      if (e.channel.label === 'remoteCursorPing') {
-        setupDataChannel(e.channel)
-      }
-    }
-    pc.ontrack = (evt): void => {
-      if (evt.track.kind === 'video' && remoteVideo) {
-        const videoStream =
-          remoteVideo.srcObject instanceof MediaStream ? remoteVideo.srcObject : new MediaStream()
-        if (!videoStream.getTracks().some((track) => track.id === evt.track.id)) {
-          videoStream.addTrack(evt.track)
-        }
-        remoteVideo.srcObject = videoStream
-      }
-      if (evt.track.kind === 'audio' && remoteAudioStream) {
-        hasRemoteAudio = true
-        if (!remoteAudioStream.getTracks().some((track) => track.id === evt.track.id)) {
-          remoteAudioStream.addTrack(evt.track)
-        }
-        void EnableRemoteAudio()
-      }
-    }
-    pc.onicecandidate = function (e: RTCPeerConnectionIceEvent): void {
-      const cand = e.candidate
-      if (!cand) {
-        console.log('icecandidate gathering: complete')
-      } else {
-        console.log('new icecandidate')
-      }
-    }
-    pc.oniceconnectionstatechange = function (): void {
-      connectionState = pc.iceConnectionState
-    }
+
     try {
-      audioStream = await navigator.mediaDevices.getUserMedia({
-        video: false,
-        audio: true
-      })
-    } catch (e) {
-      errorHander(e)
-    }
-    if (!remoteVideo) {
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: options.shareSystemAudio === true
-        })
-        for (const track of stream.getVideoTracks()) {
-          pc.addTrack(track, stream)
-        }
-        const [displayAudioTrack] = stream.getAudioTracks()
-        if (displayAudioTrack && systemAudioSender) {
-          await systemAudioSender.replaceTrack(displayAudioTrack)
-        }
-        if (audioStream) {
-          for (const track of audioStream.getTracks()) {
-            track.enabled = userSettings.isMicrophoneEnabledOnConnect
-            pc.addTrack(track, stream)
-          }
-        }
-      } catch (e) {
-        errorHander(e)
+      audioStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+      for (const track of audioStream.getAudioTracks()) {
+        track.enabled = userSettings.isMicrophoneEnabledOnConnect
       }
+    } catch (error) {
+      errorHander(error)
+    }
+
+    if (remoteVideo) {
+      await createParticipantPeer()
+      return
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: options.shareSystemAudio === true
+      })
+    } catch (error) {
+      errorHander(error)
     }
   }
-  export async function CreateParticipantUrl(
-    c: RTCSessionDescriptionOptions,
-    data: { username: string }
-  ): Promise<string> {
-    if (pc?.localDescription?.type !== 'answer') {
-      try {
-        const desc = new RTCSessionDescription(c)
-        await pc.setRemoteDescription(desc)
-        if (remoteVideo) {
-          addGuestAudioTracks()
-        }
-        if (desc.type === 'offer') {
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-        }
-      } catch (e) {
-        errorHander(e)
-      }
+
+  export async function AcceptHostOffer(description: RTCSessionDescriptionOptions): Promise<void> {
+    const pc = participantPc
+    if (!pc) throw new Error('The participant connection is not ready')
+    if (pc.remoteDescription) throw new Error('This participant has already accepted an invitation')
+    const remoteDescription = new RTCSessionDescription(description)
+    if (remoteDescription.type !== 'offer') throw new Error('Expected a host invitation')
+    await pc.setRemoteDescription(remoteDescription)
+    await addGuestAudioTracks(pc, remoteDescription.sdp)
+    await pc.setLocalDescription(await pc.createAnswer())
+  }
+
+  export async function CreateParticipantUrl(data: {
+    username: string
+    invitationId?: string
+  }): Promise<string> {
+    const pc = participantPc
+    if (!pc?.localDescription || pc.localDescription.type !== 'answer') {
+      throw new Error('The participant answer is not ready')
     }
-    await waitForIceGatheringComplete()
+    await waitForIceGatheringComplete(pc)
     return await getConnectionString(ConnectionType.PARTICIPANT, pc.localDescription, data)
   }
+
   export async function CreateHostUrl(data: { username: string }): Promise<string> {
-    if (pc?.localDescription?.type !== 'offer') {
-      remoteMouseCursorPositionsChannel = pc.createDataChannel('remoteMouseCursorPositions')
-      remoteCursorPingChannel = pc.createDataChannel('remoteCursorPing')
-      setupDataChannel(remoteMouseCursorPositionsChannel)
-      setupDataChannel(remoteCursorPingChannel)
-      const desc = await pc.createOffer()
-      await pc.setLocalDescription(desc)
+    if (remoteVideo) throw new Error('A participant cannot create host invitations')
+    if (hostPeers.size >= MAX_HOST_PARTICIPANTS) {
+      throw new Error(`A host can keep up to ${MAX_HOST_PARTICIPANTS} invitations or participants`)
     }
-    await waitForIceGatheringComplete()
-    return await getConnectionString(ConnectionType.HOST, pc.localDescription, data)
+
+    const invitationId = createInvitationId()
+    const peer = await createHostPeer(invitationId)
+    try {
+      await peer.pc.setLocalDescription(await peer.pc.createOffer())
+      await waitForIceGatheringComplete(peer.pc)
+      if (!peer.pc.localDescription) throw new Error('The host invitation is not ready')
+      return await getConnectionString(ConnectionType.HOST, peer.pc.localDescription, {
+        ...data,
+        invitationId
+      })
+    } catch (error) {
+      closeHostPeer(invitationId)
+      throw error
+    }
   }
+
+  export async function AcceptParticipantAnswer(
+    description: RTCSessionDescriptionOptions,
+    invitationId: string,
+    participantName: string
+  ): Promise<void> {
+    const availablePeers = [...hostPeers.values()].filter((peer) => !peer.pc.remoteDescription)
+    const peer = invitationId
+      ? hostPeers.get(invitationId)
+      : availablePeers.length === 1
+        ? availablePeers[0]
+        : undefined
+    if (!peer) {
+      throw new Error('This answer does not match a pending invitation from this host')
+    }
+    if (peer.pc.remoteDescription) throw new Error('This invitation has already been used')
+
+    const remoteDescription = new RTCSessionDescription(description)
+    if (remoteDescription.type !== 'answer') throw new Error('Expected a participant answer')
+    peer.participantName = participantName
+    await peer.pc.setRemoteDescription(remoteDescription)
+    updateHostPeerCounts()
+  }
+
   export function ToggleDisplayStream(): void {
-    if (stream) {
-      for (const track of stream.getVideoTracks()) {
-        track.enabled = !track.enabled
-      }
-    }
+    for (const track of stream?.getVideoTracks() ?? []) track.enabled = !track.enabled
   }
+
   export function ToggleMicrophone(): void {
-    if (audioStream) {
-      for (const track of audioStream.getAudioTracks()) {
-        track.enabled = !track.enabled
-      }
-    }
+    for (const track of audioStream?.getAudioTracks() ?? []) track.enabled = !track.enabled
   }
+
   export function ToggleSystemAudio(): void {
     const tracks = getSystemAudioTracks()
     const enabled = !tracks.some((track) => track.enabled)
-    for (const track of tracks) {
-      track.enabled = enabled
-    }
+    for (const track of tracks) track.enabled = enabled
   }
+
   export function IsSystemAudioActive(): boolean {
     return getSystemAudioTracks().some((track) => track.readyState === 'live' && track.enabled)
   }
+
   export function IsMicrophoneActive(): boolean {
-    if (audioStream) {
-      for (const track of audioStream.getAudioTracks()) {
-        return track.enabled
-      }
-    }
-    return false
+    return audioStream?.getAudioTracks().some((track) => track.enabled) === true
   }
-  export async function Connect(c: RTCSessionDescriptionOptions): Promise<void> {
-    try {
-      const desc = new RTCSessionDescription(c)
-      await pc.setRemoteDescription(desc)
-      if (remoteVideo) {
-        addGuestAudioTracks()
-      }
-      if (desc.type === 'offer') {
-        const answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-      }
-    } catch (e) {
-      errorHander(e)
-    }
-  }
+
   export function IsConnected(): boolean {
-    return pc ? pc.connectionState === 'connected' : false
+    if (remoteVideo) return participantPc?.connectionState === 'connected'
+    return connectedParticipantCount > 0
   }
+
   export async function Disconnect(): Promise<void> {
     try {
+      shuttingDown = true
       await stopSystemAudioStream()
-      pc.close()
-      pc = null
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          track.stop()
-        }
-        stream = null
-      }
-      if (audioStream) {
-        for (const track of audioStream.getTracks()) {
-          track.stop()
-        }
-        audioStream = null
-      }
+      participantPc?.close()
+      participantPc = null
+      for (const invitationId of [...hostPeers.keys()]) closeHostPeer(invitationId)
+
+      for (const track of stream?.getTracks() ?? []) track.stop()
+      stream = null
+      for (const track of audioStream?.getTracks() ?? []) track.stop()
+      audioStream = null
+
+      if (remoteVideo) remoteVideo.srcObject = null
       if (audioElement) {
         audioElement.pause()
         audioElement.srcObject = null
@@ -518,13 +654,21 @@
         audioElement = null
       }
       remoteAudioStream = null
-      systemAudioSender = null
+      remoteMouseCursorPositionsChannel = null
+      remoteCursorPingChannel = null
+      remoteCursorPositionsEnabled = false
+      connectedParticipantCount = 0
+      pendingParticipantCount = 0
       hasRemoteAudio = false
       remoteAudioActive = false
       remoteAudioPlaybackBlocked = false
       systemAudioCaptureError = ''
-    } catch (e) {
-      errorHander(e)
+      connectionState = 'disconnected'
+      userSettings = null
+    } catch (error) {
+      errorHander(error)
+    } finally {
+      shuttingDown = false
     }
   }
 </script>

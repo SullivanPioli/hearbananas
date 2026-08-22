@@ -14,6 +14,7 @@ export const getRTCPeerConnectionConfig = async (): Promise<RTCConfiguration> =>
     }
   })
   return {
-    iceServers
+    iceServers,
+    bundlePolicy: 'max-bundle'
   }
 }

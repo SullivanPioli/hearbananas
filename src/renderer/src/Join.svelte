@@ -30,6 +30,7 @@
   let connectionStringIsValid: boolean | null = null
   let connectToUserName = ''
   let copyButtonIsLoading = false
+  let copiedAnswerLength = 0
   let hasRemoteAudio = false
   let remoteAudioActive = false
   let remoteAudioPlaybackBlocked = false
@@ -37,14 +38,25 @@
   let visualizerIsActive: boolean = true
 
   const onConnectionStringChange = async (): Promise<void> => {
-    if ($connectionString === '') {
+    const value = $connectionString
+    connectToUserName = ''
+    if (value === '') {
       connectionStringIsValid = null
       return
     }
-    connectionStringIsValid = mayBeConnectionString(ConnectionType.HOST, $connectionString)
-    if (connectionStringIsValid) {
-      const bananasData = await getDataFromBananasUrl($connectionString)
+    if (!mayBeConnectionString(ConnectionType.HOST, value)) {
+      connectionStringIsValid = false
+      return
+    }
+
+    connectionStringIsValid = null
+    try {
+      const bananasData = await getDataFromBananasUrl(value)
+      if ($connectionString !== value) return
       connectToUserName = bananasData.data.username
+      connectionStringIsValid = true
+    } catch {
+      if ($connectionString === value) connectionStringIsValid = false
     }
   }
 
@@ -90,23 +102,43 @@
     microphoneActive = settings.isMicrophoneEnabledOnConnect
     makeVideoDraggable(remoteScreen)
     connectButton.addEventListener('click', async () => {
-      await webRTCComponent.Setup(remoteScreen, { remoteAudioElement })
-      const data = await getDataFromBananasUrl($connectionString)
-      await webRTCComponent.Connect(data.rtcSessionDescription)
-      isConnected = true
-      $isWatching = true
-      $navigationEnabled = false
+      try {
+        await webRTCComponent.Setup(remoteScreen, { remoteAudioElement })
+        const data = await getDataFromBananasUrl($connectionString)
+        await webRTCComponent.AcceptHostOffer(data.rtcSessionDescription)
+        isConnected = true
+        $isWatching = true
+        $navigationEnabled = false
+      } catch (error) {
+        await webRTCComponent.Disconnect()
+        Swal.fire({
+          icon: 'error',
+          title: 'Could not accept invitation',
+          text: error instanceof Error ? error.message : String(error)
+        })
+      }
     })
     copyButton.addEventListener('click', async () => {
       copyButtonIsLoading = true
-      const remoteData = await getDataFromBananasUrl($connectionString)
-      const data = await webRTCComponent.CreateParticipantUrl(remoteData.rtcSessionDescription, {
-        username: settings.username
-      })
-      navigator.clipboard.writeText(data)
-      setTimeout(() => {
-        copyButtonIsLoading = false
-      }, 400)
+      try {
+        const remoteData = await getDataFromBananasUrl($connectionString)
+        const data = await webRTCComponent.CreateParticipantUrl({
+          username: settings.username,
+          invitationId: remoteData.invitationId
+        })
+        copiedAnswerLength = data.length
+        await navigator.clipboard.writeText(data)
+      } catch (error) {
+        Swal.fire({
+          icon: 'error',
+          title: 'Could not create answer',
+          text: error instanceof Error ? error.message : String(error)
+        })
+      } finally {
+        setTimeout(() => {
+          copyButtonIsLoading = false
+        }, 400)
+      }
     })
     remoteScreen.addEventListener('dblclick', () => {
       webRTCComponent.PingRemoteCursor('cursor-' + UUID)
@@ -136,6 +168,7 @@
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
+    copiedAnswerLength = 0
     $navigationEnabled = true
     $isWatching = false
   }
@@ -278,6 +311,14 @@
             </span>
             <span>{L.copy_my_connection_string()}</span>
           </button>
+          {#if copiedAnswerLength > 0}
+            <p class="help {copiedAnswerLength <= 2000 ? 'is-success' : 'is-danger'}">
+              Answer copied ({copiedAnswerLength} characters). Send it back to the host.{copiedAnswerLength <=
+              2000
+                ? ''
+                : ' Discord may reject this network-specific answer; send it as a text file.'}
+            </p>
+          {/if}
         </div>
       </div>
       <div class="cell">
