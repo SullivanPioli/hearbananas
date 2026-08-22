@@ -16,6 +16,8 @@
   let platform = ''
 
   let connectionState = 'disconnected'
+  let connectedParticipantCount = 0
+  let pendingParticipantCount = 0
   let cursorsActive = false
   let displayStreamActive = false
   let microphoneActive = false
@@ -24,6 +26,7 @@
   let connectionStringIsValid: boolean | null = null
   let connectToUserName = ''
   let copyButtonIsLoading = false
+  let copiedInvitationLength = 0
   let connectionString = useHostUrl()
   let hasAudioInput = false
   let shareSystemAudio = false
@@ -45,14 +48,25 @@
   let visualizerIsActive: boolean = true
 
   const onConnectionStringChange = async (): Promise<void> => {
-    if ($connectionString === '') {
+    const value = $connectionString
+    connectToUserName = ''
+    if (value === '') {
       connectionStringIsValid = null
       return
     }
-    connectionStringIsValid = mayBeConnectionString(ConnectionType.PARTICIPANT, $connectionString)
-    if (connectionStringIsValid) {
-      const banansData = await getDataFromBananasUrl($connectionString)
-      connectToUserName = banansData.data.username
+    if (!mayBeConnectionString(ConnectionType.PARTICIPANT, value)) {
+      connectionStringIsValid = false
+      return
+    }
+
+    connectionStringIsValid = null
+    try {
+      const bananasData = await getDataFromBananasUrl(value)
+      if ($connectionString !== value) return
+      connectToUserName = bananasData.data.username
+      connectionStringIsValid = true
+    } catch {
+      if ($connectionString === value) connectionStringIsValid = false
     }
   }
 
@@ -134,20 +148,45 @@
     const settings = await window.BananasApi.getSettings()
     microphoneActive = settings.isMicrophoneEnabledOnConnect
     connectButton.addEventListener('click', async () => {
-      const data = await getDataFromBananasUrl($connectionString)
-      await webRTCComponent.Connect(data.rtcSessionDescription)
-      isStreaming = true
-      displayStreamActive = true
+      try {
+        const data = await getDataFromBananasUrl($connectionString)
+        await webRTCComponent.AcceptParticipantAnswer(
+          data.rtcSessionDescription,
+          data.invitationId,
+          data.data.username
+        )
+        isStreaming = true
+        displayStreamActive = true
+        $connectionString = ''
+        connectionStringIsValid = null
+        connectToUserName = ''
+      } catch (error) {
+        Swal.fire({
+          icon: 'error',
+          title: 'Could not add participant',
+          text: error instanceof Error ? error.message : String(error)
+        })
+      }
     })
     copyButton.addEventListener('click', async () => {
       copyButtonIsLoading = true
-      const offer = await webRTCComponent.CreateHostUrl({
-        username: settings.username
-      })
-      navigator.clipboard.writeText(offer)
-      setTimeout(() => {
-        copyButtonIsLoading = false
-      }, 400)
+      try {
+        const offer = await webRTCComponent.CreateHostUrl({
+          username: settings.username
+        })
+        copiedInvitationLength = offer.length
+        await navigator.clipboard.writeText(offer)
+      } catch (error) {
+        Swal.fire({
+          icon: 'error',
+          title: 'Could not create invitation',
+          text: error instanceof Error ? error.message : String(error)
+        })
+      } finally {
+        setTimeout(() => {
+          copyButtonIsLoading = false
+        }, 400)
+      }
     })
   })
   const onStartSessionButtonClick = async (): Promise<void> => {
@@ -255,6 +294,9 @@
     sessionStarted = false
     connectionStringIsValid = null
     copyButtonIsLoading = false
+    copiedInvitationLength = 0
+    connectedParticipantCount = 0
+    pendingParticipantCount = 0
     $navigationEnabled = true
     $isHosting = false
   }
@@ -288,6 +330,8 @@
 
 <WebRTC
   bind:connectionState
+  bind:connectedParticipantCount
+  bind:pendingParticipantCount
   bind:hasRemoteAudio
   bind:remoteAudioActive
   bind:remoteAudioPlaybackBlocked
@@ -444,19 +488,35 @@
 
       <div class="cell">
         <button
-          class="button is-link {!sessionStarted || isStreaming
-            ? 'is-hidden'
-            : ''} {copyButtonIsLoading ? 'is-loading' : ''}"
+          class="button is-link {!sessionStarted ? 'is-hidden' : ''} {copyButtonIsLoading
+            ? 'is-loading'
+            : ''}"
           bind:this={copyButton}
           disabled={shareSystemAudio && !hasSystemAudioInput}
         >
           <span class="icon">
             <i class="fas fa-copy"></i>
           </span>
-          <span>{L.copy_my_connection_string()}</span>
+          <span>Copy a new friend invitation</span>
         </button>
+        {#if copiedInvitationLength > 0}
+          <p class="help {copiedInvitationLength <= 2000 ? 'is-success' : 'is-danger'}">
+            Invitation copied ({copiedInvitationLength} characters). Each invitation is for one friend.{copiedInvitationLength <=
+            2000
+              ? ''
+              : ' Discord may reject this network-specific invitation; send it as a text file.'}
+          </p>
+        {/if}
       </div>
     </div>
+
+    {#if sessionStarted}
+      <div class="notification is-info is-light">
+        <strong>{connectedParticipantCount} connected</strong>
+        · {pendingParticipantCount} invitation{pendingParticipantCount === 1 ? '' : 's'} waiting or connecting.
+        Create a separate invitation for every friend, then paste each returned answer below.
+      </div>
+    {/if}
 
     {#if sessionStarted && !isStreaming && shareSystemAudio && systemAudioDevices.length > 0}
       <div class="field">
@@ -520,11 +580,11 @@
       </div>
     {/if}
 
-    <div class="field has-addons {!sessionStarted || isStreaming ? 'is-hidden' : ''}">
+    <div class="field has-addons {!sessionStarted ? 'is-hidden' : ''}">
       <div class="control has-icons-left has-icons-right">
         <input
           bind:value={$connectionString}
-          placeholder="participant connection string"
+          placeholder="participant answer string"
           class="input {connectionStringIsValid === null
             ? ''
             : connectionStringIsValid
@@ -558,7 +618,7 @@
           <span class="icon">
             <i class="fas fa-link"></i>
           </span>
-          <span>{L.connect()} {connectionStringIsValid ? connectToUserName : ''} </span>
+          <span>Add {connectionStringIsValid ? connectToUserName : 'participant'} </span>
         </button>
       </div>
     </div>
