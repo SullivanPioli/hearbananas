@@ -34,6 +34,7 @@
   let hasRemoteAudio = false
   let remoteAudioActive = false
   let remoteAudioPlaybackBlocked = false
+  let microphoneMutedByHost = false
   let connectionString = useParticipantUrl()
   let visualizerIsActive: boolean = true
 
@@ -96,6 +97,11 @@
 
   $: $connectionString, onConnectionStringChange()
   $: connectionState, onConnectionStateChange()
+  $: microphoneMutedByHost, syncMicrophoneState()
+
+  function syncMicrophoneState(): void {
+    if (webRTCComponent) microphoneActive = webRTCComponent.IsMicrophoneActive()
+  }
 
   onMount(async () => {
     const settings = await window.BananasApi.getSettings()
@@ -168,6 +174,7 @@
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
+    microphoneMutedByHost = false
     copiedAnswerLength = 0
     $navigationEnabled = true
     $isWatching = false
@@ -189,8 +196,7 @@
     remoteScreen.style.scale = zoomFactor.toString()
   }
   const onMicrophoneToggle = async (): Promise<void> => {
-    microphoneActive = !microphoneActive
-    webRTCComponent.ToggleMicrophone()
+    microphoneActive = webRTCComponent.ToggleMicrophone()
   }
   const onRemoteAudioToggle = async (): Promise<void> => {
     remoteAudioActive = await webRTCComponent.ToggleRemoteAudio()
@@ -202,6 +208,7 @@
   bind:hasRemoteAudio
   bind:remoteAudioActive
   bind:remoteAudioPlaybackBlocked
+  bind:microphoneMutedByHost
   bind:this={webRTCComponent}
 />
 <audio bind:this={remoteAudioElement} autoplay class="is-hidden"></audio>
@@ -213,10 +220,19 @@
       <div class="grid">
         <div class="cell">
           <button
-            aria-label="{microphoneActive ? L.microphone_active() : L.microphone_inactive()}}"
-            title={microphoneActive ? L.microphone_active() : L.microphone_inactive()}
+            aria-label={microphoneMutedByHost
+              ? 'Microphone muted by host'
+              : microphoneActive
+                ? L.microphone_active()
+                : L.microphone_inactive()}
+            title={microphoneMutedByHost
+              ? 'Microphone muted by host'
+              : microphoneActive
+                ? L.microphone_active()
+                : L.microphone_inactive()}
             class="button {microphoneActive ? 'is-success' : 'is-danger'}"
             on:click={onMicrophoneToggle}
+            disabled={microphoneMutedByHost}
           >
             <span class="icon">
               {#if microphoneActive}
@@ -254,6 +270,11 @@
       </div>
     </div>
   </div>
+  {#if microphoneMutedByHost}
+    <div class="notification is-info is-light mt-3">
+      The host muted your hearBananas microphone. This does not mute you in Discord or Vesktop.
+    </div>
+  {/if}
   <div class="fixed-grid has-2-cols">
     <div class="grid">
       <div class="cell">

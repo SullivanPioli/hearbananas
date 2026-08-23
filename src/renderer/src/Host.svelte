@@ -4,6 +4,7 @@
   import { L } from './translations'
   import { useNavigationEnabled, useIsHosting, useHostUrl } from './stores'
   import { mayBeConnectionString, getDataFromBananasUrl, ConnectionType } from './Utils'
+  import type { HostParticipant } from './BananasTypes'
   import AudioVisualizer from './AudioVisualizer.svelte'
   import WebRTC from './WebRTC.svelte'
 
@@ -18,6 +19,7 @@
   let connectionState = 'disconnected'
   let connectedParticipantCount = 0
   let pendingParticipantCount = 0
+  let hostParticipants: HostParticipant[] = []
   let cursorsActive = false
   let displayStreamActive = false
   let microphoneActive = false
@@ -217,7 +219,8 @@
 
     await webRTCComponent.Setup(null, {
       shareSystemAudio: shareSystemAudio && platform === 'win32' && !excludeDiscordVesktop,
-      remoteAudioElement
+      remoteAudioElement,
+      muteParticipantMicrophonesOnConnect: shareSystemAudio && excludeDiscordVesktop
     })
     sessionStarted = true
     $navigationEnabled = false
@@ -297,6 +300,7 @@
     copiedInvitationLength = 0
     connectedParticipantCount = 0
     pendingParticipantCount = 0
+    hostParticipants = []
     $navigationEnabled = true
     $isHosting = false
   }
@@ -306,8 +310,7 @@
     reset()
   }
   const onMicrophoneToggle = async (): Promise<void> => {
-    microphoneActive = !microphoneActive
-    webRTCComponent.ToggleMicrophone()
+    microphoneActive = webRTCComponent.ToggleMicrophone()
   }
   const onDisplayStreamToggle = async (): Promise<void> => {
     displayStreamActive = !displayStreamActive
@@ -326,12 +329,39 @@
   const onRemoteAudioToggle = async (): Promise<void> => {
     remoteAudioActive = await webRTCComponent.ToggleRemoteAudio()
   }
+  const onParticipantMuteToggle = (participant: HostParticipant): void => {
+    webRTCComponent.SetHostParticipantMuted(participant.id, !participant.muted)
+  }
+  const getParticipantFromEvent = (event: MouseEvent): HostParticipant | undefined => {
+    const invitationId = (event.currentTarget as HTMLButtonElement).dataset.participantId
+    return hostParticipants.find((participant) => participant.id === invitationId)
+  }
+  const onParticipantMuteClick = (event: MouseEvent): void => {
+    const participant = getParticipantFromEvent(event)
+    if (participant) onParticipantMuteToggle(participant)
+  }
+  const onParticipantKick = async (participant: HostParticipant): Promise<void> => {
+    const result = await Swal.fire({
+      icon: 'warning',
+      title: `Kick ${participant.name}?`,
+      text: 'Their stream connection will close. They will need a new invitation to return.',
+      showCancelButton: true,
+      confirmButtonText: 'Kick participant',
+      confirmButtonColor: '#f14668'
+    })
+    if (result.isConfirmed) webRTCComponent.KickHostParticipant(participant.id)
+  }
+  const onParticipantKickClick = (event: MouseEvent): void => {
+    const participant = getParticipantFromEvent(event)
+    if (participant) void onParticipantKick(participant)
+  }
 </script>
 
 <WebRTC
   bind:connectionState
   bind:connectedParticipantCount
   bind:pendingParticipantCount
+  bind:hostParticipants
   bind:hasRemoteAudio
   bind:remoteAudioActive
   bind:remoteAudioPlaybackBlocked
@@ -455,7 +485,8 @@
         </label>
         <p class="help">
           Discord, Discord Canary/PTB, and Vesktop remain audible to you but are removed from the
-          outgoing stream. On Windows, exactly one of those applications must be running.
+          outgoing stream. Participants start host-muted to prevent their return audio from looping
+          into the capture. On Windows, exactly one Discord/Vesktop application must be running.
         </p>
       </div>
     {/if}
@@ -515,6 +546,56 @@
         <strong>{connectedParticipantCount} connected</strong>
         · {pendingParticipantCount} invitation{pendingParticipantCount === 1 ? '' : 's'} waiting or connecting.
         Create a separate invitation for every friend, then paste each returned answer below.
+      </div>
+    {/if}
+
+    {#if hostParticipants.length > 0}
+      <div class="box">
+        <h2 class="title is-5 mb-2">Room members</h2>
+        <p class="help mb-3">
+          Mute stops that participant's microphone both for you and at their sender. Kick closes
+          only their connection.
+        </p>
+        {#each hostParticipants as participant (participant.id)}
+          <div class="level is-mobile mb-2">
+            <div class="level-left">
+              <div class="level-item">
+                <span class="icon mr-2"><i class="fas fa-user"></i></span>
+                <div>
+                  <strong>{participant.name}</strong>
+                  <p class="is-size-7 has-text-grey">{participant.state}</p>
+                </div>
+              </div>
+            </div>
+            <div class="level-right">
+              <div class="level-item buttons are-small">
+                <button
+                  class="button {participant.muted ? 'is-warning' : 'is-light'}"
+                  title={participant.muted
+                    ? `Unmute ${participant.name}`
+                    : `Mute ${participant.name}`}
+                  data-participant-id={participant.id}
+                  on:click={onParticipantMuteClick}
+                >
+                  <span class="icon">
+                    <i class="fas {participant.muted ? 'fa-microphone-slash' : 'fa-microphone'}"
+                    ></i>
+                  </span>
+                  <span>{participant.muted ? 'Unmute' : 'Mute'}</span>
+                </button>
+                <button
+                  class="button is-danger is-light"
+                  title={`Kick ${participant.name}`}
+                  data-participant-id={participant.id}
+                  on:click={onParticipantKickClick}
+                >
+                  <span class="icon"><i class="fas fa-user-xmark"></i></span>
+                  <span>Kick</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        {/each}
       </div>
     {/if}
 

@@ -6,6 +6,13 @@ export type BananasRemoteCursorData = {
   y: number
 }
 
+export type HostParticipant = {
+  id: string
+  name: string
+  state: 'connecting' | 'connected' | 'disconnected'
+  muted: boolean
+}
+
 type IceServer = {
   urls: string
   username?: string
