@@ -46,9 +46,15 @@ host's upload bandwidth grows with every connected friend, so lower the capture 
 frame rate if several viewers experience stuttering.
 
 New connection strings use a compact format designed to fit under Discord's 2,000-character
-message limit on ordinary networks. The app displays the exact length after copying. Unusually
-large ICE/TURN configurations can still exceed the limit; in that case, send the string as a text
-file without editing it.
+message limit on ordinary networks. The parser accepts codes pasted inside Discord angle brackets,
+Markdown code blocks, or surrounding text, and remains compatible with v2 compact and original
+legacy codes. The app displays the exact length after copying. Unusually large ICE/TURN
+configurations can still exceed the limit; in that case, send the string as a text file without
+editing it.
+
+After a friend returns an answer, the host's **Room members** list shows their connection state. The
+host can mute an individual hearBananas microphone (without muting that person in Discord/Vesktop)
+or kick that participant without disconnecting anyone else.
 
 ## System audio sharing
 
@@ -84,6 +90,9 @@ stream identity. Discord running inside a general web browser is seen as browser
 therefore not excluded. On Windows, filtered capture fails closed if no supported application is
 running or if multiple independent Discord/Vesktop process trees are detected; cancel the session
 and correct that condition, or turn the exclusion option off if whole-system loopback is acceptable.
+When exclusion is enabled, newly joined hearBananas participants also start host-muted. This keeps
+their return-audio playback from being captured and rebroadcast as part of the Windows system mix;
+the host can unmute them individually from **Room members** when wanted.
 
 Building the Windows installer from source requires CMake and the Visual Studio C++ toolchain. The
 Windows build script compiles the helper first and packages it beside the Electron application.

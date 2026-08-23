@@ -12,7 +12,8 @@ export type BananasConnectionData = {
   rtcSessionDescription: RTCSessionDescriptionInit
 }
 
-const COMPACT_CONNECTION_VERSION = 2
+const COMPACT_CONNECTION_VERSION = 3
+const SUPPORTED_COMPACT_CONNECTION_VERSIONS = new Set(['2', '3'])
 const MAX_CONNECTION_TOKEN_CHARACTERS = 100_000
 const MAX_DECOMPRESSED_SDP_CHARACTERS = 1_000_000
 
@@ -113,8 +114,19 @@ export const createInvitationId = (): string => {
   return bytesToBase64Url(bytes)
 }
 
+export const normalizeConnectionStringInput = (value: string): string => {
+  const decodedHtml = value.replaceAll(/&amp;/gi, '&').trim()
+  const match = decodedHtml.match(/bananas:[^\s<>"'`]+/i)
+  if (!match) return decodedHtml
+
+  // Discord commonly surrounds links with angle brackets or Markdown code markers. Extracting the
+  // scheme also lets people paste a connection code from a sentence instead of carefully selecting
+  // only the URL.
+  return match[0].replace(/[),.\];!?]+$/, '')
+}
+
 const parseConnectionUrl = (value: string): { url: URL; type: ConnectionType } => {
-  const url = new URL(value.trim())
+  const url = new URL(normalizeConnectionStringInput(value))
   const type = getConnectionTypeFromUrl(url)
   if (!type) throw new Error('This is not a hearBananas connection string')
   return { url, type }
@@ -125,8 +137,16 @@ export const mayBeConnectionString = (ct: ConnectionType, str: string): boolean 
     const { url, type } = parseConnectionUrl(str)
     if (type !== ct) return false
     const username = url.searchParams.get('u') ?? url.searchParams.get('username')
-    const token = url.searchParams.get('s') ?? url.searchParams.get('token')
+    const compactToken = url.searchParams.get('s')
+    const legacyToken = url.searchParams.get('token')
+    const token = compactToken ?? legacyToken
     if (!token || !username || token.length > MAX_CONNECTION_TOKEN_CHARACTERS) return false
+    if (
+      compactToken &&
+      !SUPPORTED_COMPACT_CONNECTION_VERSIONS.has(url.searchParams.get('v') ?? '')
+    ) {
+      return false
+    }
     return true
   } catch {
     return false
@@ -152,8 +172,7 @@ export const getConnectionString = async (
   params.set('u', data.username)
   if (data.invitationId) params.set('i', data.invitationId)
   params.set('s', await compressSessionDescription(description.sdp))
-  const typeCode = ct === ConnectionType.HOST ? 'h' : 'p'
-  return `bananas:${typeCode}?${params.toString()}`
+  return `bananas://${ct}?${params.toString()}`
 }
 
 export const getDataFromBananasUrl = async (value: string): Promise<BananasConnectionData> => {
@@ -163,6 +182,10 @@ export const getDataFromBananasUrl = async (value: string): Promise<BananasConne
 
   const compactToken = url.searchParams.get('s')
   if (compactToken) {
+    const version = url.searchParams.get('v') ?? ''
+    if (!SUPPORTED_COMPACT_CONNECTION_VERSIONS.has(version)) {
+      throw new Error('This connection string was made by an unsupported hearBananas version')
+    }
     const expectedType = type === ConnectionType.HOST ? 'offer' : 'answer'
     return {
       type,
@@ -180,7 +203,7 @@ export const getDataFromBananasUrl = async (value: string): Promise<BananasConne
   return {
     type,
     data: { username },
-    invitationId: '',
+    invitationId: url.searchParams.get('i') ?? '',
     rtcSessionDescription: await decompressJson(legacyToken)
   }
 }

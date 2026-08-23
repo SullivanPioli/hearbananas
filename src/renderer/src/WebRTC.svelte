@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { RTCSessionDescriptionOptions } from './Utils'
-  import type { BananasRemoteCursorData, SettingsData } from './BananasTypes'
+  import type { BananasRemoteCursorData, HostParticipant, SettingsData } from './BananasTypes'
   import {
     createInvitationId,
     getConnectionString,
@@ -8,19 +8,28 @@
     ConnectionType
   } from './Utils'
   import { getRTCPeerConnectionConfig } from './Config'
+  import {
+    isParticipantMicrophoneEnabled,
+    parseHostControlMessage,
+    summarizeHostPeerState
+  } from './WebRTCState'
+  import type { HostControlMessage } from './WebRTCState'
   import windowsSystemAudioProcessorUrl from './windowsSystemAudioProcessor.js?worker&url'
 
   export let connectionState: string = 'disconnected'
   export let connectedParticipantCount = 0
   export let pendingParticipantCount = 0
+  export let hostParticipants: HostParticipant[] = []
   export let hasRemoteAudio = false
   export let remoteAudioActive = false
   export let remoteAudioPlaybackBlocked = false
   export let systemAudioCaptureError = ''
+  export let microphoneMutedByHost = false
 
   type SetupOptions = {
     shareSystemAudio?: boolean
     remoteAudioElement?: HTMLAudioElement | null
+    muteParticipantMicrophonesOnConnect?: boolean
   }
 
   type HostPeer = {
@@ -29,9 +38,11 @@
     pc: RTCPeerConnection
     systemAudioSender: RTCRtpSender
     remoteAudioTracks: Set<MediaStreamTrack>
+    controlChannel: RTCDataChannel
+    mutedByHost: boolean
   }
 
-  const ICE_GATHERING_TIMEOUT_MS = 10000
+  const ICE_GATHERING_TIMEOUT_MS = 20000
   const MAX_HOST_PARTICIPANTS = 8
 
   const errorHander = (error: unknown): void => {
@@ -42,6 +53,8 @@
   let participantPc: RTCPeerConnection | null = null
   const hostPeers = new Map<string, HostPeer>()
   let shuttingDown = false
+  let muteParticipantMicrophonesOnConnect = false
+  let participantMicrophoneEnabledByUser = false
   let remoteCursorPositionsEnabled = false
   let remoteMouseCursorPositionsChannel: RTCDataChannel | null = null
   let remoteCursorPingChannel: RTCDataChannel | null = null
@@ -63,6 +76,15 @@
     return remoteCursorPingChannel?.readyState === 'open'
   }
 
+  const applyParticipantMicrophoneState = (): void => {
+    for (const track of audioStream?.getAudioTracks() ?? []) {
+      track.enabled = isParticipantMicrophoneEnabled(
+        participantMicrophoneEnabledByUser,
+        microphoneMutedByHost
+      )
+    }
+  }
+
   const setupDataChannel = (dataChannel: RTCDataChannel, participantSide: boolean): void => {
     if (dataChannel.label === 'remoteMouseCursorPositions') {
       if (participantSide) remoteMouseCursorPositionsChannel = dataChannel
@@ -77,6 +99,14 @@
       dataChannel.onmessage = (event: MessageEvent): void => {
         if (!remoteCursorPositionsEnabled || participantSide) return
         window.BananasApi.remoteCursorPing(event.data)
+      }
+    }
+    if (dataChannel.label === 'hostControl' && participantSide) {
+      dataChannel.onmessage = (event: MessageEvent): void => {
+        const message = parseHostControlMessage(event.data)
+        if (!message) return
+        microphoneMutedByHost = message.muted
+        applyParticipantMicrophoneState()
       }
     }
   }
@@ -269,25 +299,32 @@
   }
 
   const waitForIceGatheringComplete = async (pc: RTCPeerConnection): Promise<void> => {
-    if (pc.iceGatheringState === 'complete') return
-    await new Promise<void>((resolve) => {
-      const cleanup = (): void => {
-        pc.removeEventListener('icegatheringstatechange', onStateChange)
-        clearTimeout(timeoutId)
-      }
-      const onStateChange = (): void => {
-        if (pc.iceGatheringState !== 'complete') return
-        cleanup()
-        resolve()
-      }
-      const timeoutId = setTimeout(() => {
-        cleanup()
-        console.warn('ICE gathering timed out; continuing with current candidates')
-        resolve()
-      }, ICE_GATHERING_TIMEOUT_MS)
-      pc.addEventListener('icegatheringstatechange', onStateChange)
-      onStateChange()
-    })
+    if (pc.iceGatheringState !== 'complete') {
+      await new Promise<void>((resolve) => {
+        const cleanup = (): void => {
+          pc.removeEventListener('icegatheringstatechange', onStateChange)
+          clearTimeout(timeoutId)
+        }
+        const onStateChange = (): void => {
+          if (pc.iceGatheringState !== 'complete') return
+          cleanup()
+          resolve()
+        }
+        const timeoutId = setTimeout(() => {
+          cleanup()
+          console.warn('ICE gathering timed out; continuing with current candidates')
+          resolve()
+        }, ICE_GATHERING_TIMEOUT_MS)
+        pc.addEventListener('icegatheringstatechange', onStateChange)
+        onStateChange()
+      })
+    }
+
+    if (!pc.localDescription?.sdp.includes('a=candidate:')) {
+      throw new Error(
+        'No network route was added to the connection code. Check the STUN/TURN settings and retry.'
+      )
+    }
   }
 
   const configureCompactCodecs = (pc: RTCPeerConnection): void => {
@@ -310,6 +347,7 @@
 
   const addRemoteAudioTrack = (track: MediaStreamTrack, peer?: HostPeer): void => {
     if (!remoteAudioStream) return
+    if (peer) track.enabled = !peer.mutedByHost
     if (!remoteAudioStream.getTracks().some((candidate) => candidate.id === track.id)) {
       remoteAudioStream.addTrack(track)
     }
@@ -324,7 +362,7 @@
       { once: true }
     )
     refreshRemoteAudioState()
-    void EnableRemoteAudio()
+    if (!peer?.mutedByHost) void EnableRemoteAudio()
   }
 
   const addRemoteVideoTrack = (track: MediaStreamTrack): void => {
@@ -337,14 +375,27 @@
     remoteVideo.srcObject = videoStream
   }
 
-  const updateHostPeerCounts = (): void => {
-    const activePeers = [...hostPeers.values()].filter(
-      (peer) => peer.pc.connectionState !== 'closed' && peer.pc.connectionState !== 'failed'
+  const updateHostPeerState = (): void => {
+    const summary = summarizeHostPeerState(
+      [...hostPeers.values()].map((peer) => ({
+        id: peer.invitationId,
+        name: peer.participantName,
+        connectionState: peer.pc.connectionState,
+        muted: peer.mutedByHost
+      }))
     )
-    connectedParticipantCount = activePeers.filter(
-      (peer) => peer.pc.connectionState === 'connected'
-    ).length
-    pendingParticipantCount = activePeers.length - connectedParticipantCount
+    connectedParticipantCount = summary.connectedCount
+    pendingParticipantCount = summary.pendingCount
+    hostParticipants = summary.participants
+  }
+
+  const sendParticipantMuteState = (peer: HostPeer): void => {
+    if (peer.controlChannel.readyState !== 'open') return
+    const message: HostControlMessage = {
+      type: 'set-microphone-muted',
+      muted: peer.mutedByHost
+    }
+    peer.controlChannel.send(JSON.stringify(message))
   }
 
   const closeHostPeer = (invitationId: string): void => {
@@ -355,7 +406,21 @@
     peer.remoteAudioTracks.clear()
     peer.pc.close()
     refreshRemoteAudioState()
-    updateHostPeerCounts()
+    updateHostPeerState()
+  }
+
+  export function SetHostParticipantMuted(invitationId: string, muted: boolean): void {
+    const peer = hostPeers.get(invitationId)
+    if (!peer || !peer.participantName) return
+    peer.mutedByHost = muted
+    for (const track of peer.remoteAudioTracks) track.enabled = !muted
+    sendParticipantMuteState(peer)
+    updateHostPeerState()
+    if (!muted) void EnableRemoteAudio()
+  }
+
+  export function KickHostParticipant(invitationId: string): void {
+    closeHostPeer(invitationId)
   }
 
   const configureHostPeerEvents = (peer: HostPeer): void => {
@@ -369,7 +434,7 @@
       if (state === 'connected') connectionState = 'connected'
       if (state === 'failed') connectionState = 'failed'
       if (state === 'closed') connectionState = 'closed'
-      updateHostPeerCounts()
+      updateHostPeerState()
       if (state === 'failed' || state === 'closed') {
         queueMicrotask(() => closeHostPeer(peer.invitationId))
       }
@@ -401,22 +466,26 @@
       })
     }
 
+    const controlChannel = pc.createDataChannel('hostControl')
     const peer: HostPeer = {
       invitationId,
       participantName: '',
       pc,
       systemAudioSender: systemAudioTransceiver.sender,
-      remoteAudioTracks: new Set()
+      remoteAudioTracks: new Set(),
+      controlChannel,
+      mutedByHost: muteParticipantMicrophonesOnConnect
     }
     hostPeers.set(invitationId, peer)
     configureHostPeerEvents(peer)
+    controlChannel.onopen = (): void => sendParticipantMuteState(peer)
 
     const cursorPositionsChannel = pc.createDataChannel('remoteMouseCursorPositions')
     const cursorPingChannel = pc.createDataChannel('remoteCursorPing')
     setupDataChannel(cursorPositionsChannel, false)
     setupDataChannel(cursorPingChannel, false)
     configureCompactCodecs(pc)
-    updateHostPeerCounts()
+    updateHostPeerState()
     return peer
   }
 
@@ -444,7 +513,10 @@
     const microphoneTrack = audioStream.getAudioTracks()[0]
     if (!microphoneTrack) return
 
-    microphoneTrack.enabled = userSettings.isMicrophoneEnabledOnConnect
+    microphoneTrack.enabled = isParticipantMicrophoneEnabled(
+      participantMicrophoneEnabledByUser,
+      microphoneMutedByHost
+    )
     const participantAudioSection = getParticipantAudioSection(remoteOfferSdp)
     const microphoneTransceiver = participantAudioSection
       ? pc
@@ -492,10 +564,14 @@
     shuttingDown = false
     connectedParticipantCount = 0
     pendingParticipantCount = 0
+    hostParticipants = []
     hasRemoteAudio = false
     remoteAudioActive = false
     remoteAudioPlaybackBlocked = false
     systemAudioCaptureError = ''
+    microphoneMutedByHost = false
+    muteParticipantMicrophonesOnConnect = options.muteParticipantMicrophonesOnConnect === true
+    participantMicrophoneEnabledByUser = userSettings.isMicrophoneEnabledOnConnect
     audioElement = options.remoteAudioElement ?? document.createElement('audio')
     audioElement.autoplay = true
     audioElement.muted = false
@@ -515,7 +591,7 @@
     try {
       audioStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
       for (const track of audioStream.getAudioTracks()) {
-        track.enabled = userSettings.isMicrophoneEnabledOnConnect
+        track.enabled = participantMicrophoneEnabledByUser
       }
     } catch (error) {
       errorHander(error)
@@ -599,17 +675,27 @@
 
     const remoteDescription = new RTCSessionDescription(description)
     if (remoteDescription.type !== 'answer') throw new Error('Expected a participant answer')
-    peer.participantName = participantName
     await peer.pc.setRemoteDescription(remoteDescription)
-    updateHostPeerCounts()
+    peer.participantName = participantName
+    sendParticipantMuteState(peer)
+    updateHostPeerState()
   }
 
   export function ToggleDisplayStream(): void {
     for (const track of stream?.getVideoTracks() ?? []) track.enabled = !track.enabled
   }
 
-  export function ToggleMicrophone(): void {
-    for (const track of audioStream?.getAudioTracks() ?? []) track.enabled = !track.enabled
+  export function ToggleMicrophone(): boolean {
+    if (remoteVideo) {
+      if (microphoneMutedByHost) return false
+      participantMicrophoneEnabledByUser = !participantMicrophoneEnabledByUser
+      applyParticipantMicrophoneState()
+      return participantMicrophoneEnabledByUser
+    }
+
+    const enabled = !IsMicrophoneActive()
+    for (const track of audioStream?.getAudioTracks() ?? []) track.enabled = enabled
+    return enabled
   }
 
   export function ToggleSystemAudio(): void {
@@ -659,10 +745,14 @@
       remoteCursorPositionsEnabled = false
       connectedParticipantCount = 0
       pendingParticipantCount = 0
+      hostParticipants = []
       hasRemoteAudio = false
       remoteAudioActive = false
       remoteAudioPlaybackBlocked = false
       systemAudioCaptureError = ''
+      microphoneMutedByHost = false
+      muteParticipantMicrophonesOnConnect = false
+      participantMicrophoneEnabledByUser = false
       connectionState = 'disconnected'
       userSettings = null
     } catch (error) {
